@@ -1,7 +1,7 @@
 # app.py
-# Smart Homecare Scheduler (restored full version with exports, analytics, patient/staff/schedule management)
+# Smart Homecare Scheduler (enhanced Streamlit app with full functionality)
 # Footer: All Rights Reserved © Dr. Yousra Abdelatti (purple)
-#          Developed By Dr. Mohammedelnagi Mohammed (blue)
+#         Developed By Dr. Mohammedelnagi Mohammed (blue)
 
 import streamlit as st
 import pandas as pd
@@ -12,6 +12,8 @@ import altair as alt
 import hashlib
 from docx import Document
 from docx.shared import Inches
+import tempfile
+import os
 
 # ---------------------------
 # Configuration / Constants
@@ -20,12 +22,6 @@ DB_PATH = "homecare_scheduler.db"
 APP_TITLE = "Smart Homecare Scheduler (24/7)"
 RELAXING_BG = "#E8F6F3"
 ACCENT = "#5DADE2"
-FOOTER = """
-<div style="padding:12px 0; text-align:center;">
-    <div style="font-weight:bold; color:purple;">All Rights Reserved © Dr. Yousra Abdelatti</div>
-    <div style="font-weight:bold; color:blue;">Developed By Dr. Mohammedelnagi Mohammed</div>
-</div>
-"""
 
 # ---------------------------
 # Utilities
@@ -47,6 +43,7 @@ def now_iso():
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
+    # users
     cur.execute('''
         CREATE TABLE IF NOT EXISTS users (
             username TEXT PRIMARY KEY,
@@ -55,6 +52,7 @@ def init_db():
             created_at TEXT
         )
     ''')
+    # patients
     cur.execute('''
         CREATE TABLE IF NOT EXISTS patients (
             id TEXT PRIMARY KEY,
@@ -78,6 +76,7 @@ def init_db():
             created_at TEXT
         )
     ''')
+    # staff
     cur.execute('''
         CREATE TABLE IF NOT EXISTS staff (
             id TEXT PRIMARY KEY,
@@ -93,6 +92,7 @@ def init_db():
             created_at TEXT
         )
     ''')
+    # schedule
     cur.execute('''
         CREATE TABLE IF NOT EXISTS schedule (
             visit_id TEXT PRIMARY KEY,
@@ -109,6 +109,7 @@ def init_db():
             created_at TEXT
         )
     ''')
+    # seed users
     cur.execute("SELECT COUNT(*) as c FROM users")
     if cur.fetchone()["c"] == 0:
         cur.execute("INSERT INTO users VALUES (?,?,?,?)",
@@ -122,9 +123,9 @@ init_db()
 conn = get_db_connection()
 
 # ---------------------------
-# Cached read
+# Read helpers
 # ---------------------------
-@st.cache_data
+@st.cache_data(show_spinner=False)
 def read_table(name: str):
     return pd.read_sql_query(f"SELECT * FROM {name}", conn)
 
@@ -151,7 +152,13 @@ def make_visit_id():
     return f"V{cur.fetchone()['c']+1:05d}"
 
 def render_footer():
-    st.markdown(FOOTER, unsafe_allow_html=True)
+    st.markdown("---")
+    st.markdown("""
+    <div style="padding:12px 0; text-align:center;">
+        <div style="font-weight:bold; color:purple;">All Rights Reserved © Dr. Yousra Abdelatti</div>
+        <div style="font-weight:bold; color:blue;">Developed By Dr. Mohammedelnagi Mohammed</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ---------------------------
 # Authentication
@@ -231,7 +238,7 @@ if not st.session_state.logged_in:
     st.stop()
 
 st.sidebar.title("Menu")
-menu = ["Dashboard","Patients","Staff","Schedule","Analytics","Export & Backup","Logout"]
+menu = ["Dashboard","Patients","Staff","Schedule","Analytics","Emergency","Settings","Export & Backup","Logout"]
 choice = st.sidebar.radio("Go to", menu)
 
 st.markdown(f"<div class='big-title'>{APP_TITLE}</div>", unsafe_allow_html=True)
@@ -255,11 +262,12 @@ elif choice == "Patients":
         p_id = st.text_input("Patient ID (unique)")
         p_name = st.text_input("Full name")
         p_dob = st.date_input("DOB", max_value=date.today())
+        p_gender = st.selectbox("Gender", ["Female","Male","Other"])
         submitted = st.form_submit_button("Add")
         if submitted and p_id:
             cur = conn.cursor()
-            cur.execute("INSERT OR REPLACE INTO patients (id,name,dob,created_by,created_at) VALUES (?,?,?,?,?)",
-                        (p_id,p_name,p_dob.isoformat(),st.session_state.user,now_iso()))
+            cur.execute("INSERT OR REPLACE INTO patients (id,name,dob,gender,created_by,created_at) VALUES (?,?,?,?,?,?)",
+                        (p_id,p_name,p_dob.isoformat(),p_gender,st.session_state.user,now_iso()))
             conn.commit()
             st.success("Patient added")
             st.rerun()
@@ -327,6 +335,24 @@ elif choice == "Analytics":
         w = sched['staff_id'].value_counts().reset_index()
         w.columns=["Staff","Visits"]
         st.altair_chart(alt.Chart(w).mark_bar().encode(x="Staff", y="Visits"), use_container_width=True)
+    render_footer()
+
+# ---------- Emergency ----------
+elif choice == "Emergency":
+    st.subheader("Emergency")
+    patients = read_table("patients")
+    if not patients.empty:
+        sel = st.selectbox("Patient", patients['id'].tolist())
+        row = patients[patients['id']==sel].iloc[0]
+        st.write(row.to_dict())
+    render_footer()
+
+# ---------- Settings ----------
+elif choice == "Settings":
+    st.subheader("Settings")
+    st.write(f"Logged in as {st.session_state.user}")
+    users = read_table("users")
+    st.dataframe(users)
     render_footer()
 
 # ---------- Export ----------
