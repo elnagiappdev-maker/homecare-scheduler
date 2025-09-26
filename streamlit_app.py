@@ -36,8 +36,14 @@ def now_iso():
     return datetime.utcnow().isoformat()
 
 # ---------------------------
-# Initialize DB & tables
+# Initialize DB & tables (with ALTER for backwards compatibility)
 # ---------------------------
+def ensure_column(cur, table, column, definition):
+    cur.execute(f"PRAGMA table_info({table})")
+    cols = [r[1] for r in cur.fetchall()]
+    if column not in cols:
+        cur.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
@@ -50,7 +56,7 @@ def init_db():
             created_at TEXT
         )
     ''')
-    # patients
+    # patients (add extended clinical and payment fields)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS patients (
             id TEXT PRIMARY KEY,
@@ -63,9 +69,14 @@ def init_db():
             emergency_contact TEXT,
             insurance_provider TEXT,
             insurance_number TEXT,
+            payment_type TEXT,
             allergies TEXT,
-            medications TEXT,
+            meds TEXT,
             diagnosis TEXT,
+            chief_complaint TEXT,
+            drug_history TEXT,
+            past_medical_history TEXT,
+            past_surgical_history TEXT,
             equipment_required TEXT,
             mobility TEXT,
             care_plan TEXT,
@@ -90,7 +101,7 @@ def init_db():
             created_at TEXT
         )
     ''')
-    # schedule
+    # schedule (add team column to support multi-member visits)
     cur.execute('''
         CREATE TABLE IF NOT EXISTS schedule (
             visit_id TEXT PRIMARY KEY,
@@ -105,12 +116,23 @@ def init_db():
             notes TEXT,
             created_by TEXT,
             created_at TEXT,
-            recurrence TEXT
+            recurrence TEXT,
+            team TEXT
         )
     ''')
+    # In case older DB exists, ensure new columns are present
+    ensure_column(cur, 'patients', 'payment_type', 'TEXT')
+    ensure_column(cur, 'patients', 'chief_complaint', 'TEXT')
+    ensure_column(cur, 'patients', 'drug_history', 'TEXT')
+    ensure_column(cur, 'patients', 'past_medical_history', 'TEXT')
+    ensure_column(cur, 'patients', 'past_surgical_history', 'TEXT')
+    ensure_column(cur, 'patients', 'meds', 'TEXT')
+    ensure_column(cur, 'schedule', 'team', 'TEXT')
+
     # seed users
     cur.execute("SELECT COUNT(*) as c FROM users")
-    if cur.fetchone()["c"] == 0:
+    row = cur.fetchone()
+    if row is None or row[0] == 0:
         cur.execute("INSERT INTO users VALUES (?,?,?,?)",
                     ("admin", hash_pw("1234"), "admin", now_iso()))
         cur.execute("INSERT INTO users VALUES (?,?,?,?)",
@@ -160,13 +182,11 @@ def is_conflict(staff_id, date, start, end):
     cur = conn.cursor()
     cur.execute("""
         SELECT * FROM schedule 
-        WHERE staff_id = ? AND date = ?
-        AND (
-            (? BETWEEN start_time AND end_time) OR 
-            (? BETWEEN start_time AND end_time) OR
-            (start_time BETWEEN ? AND ?) OR 
-            (end_time BETWEEN ? AND ?)
-        )
+        WHERE staff_id = ? AND date = ? 
+        AND ((? BETWEEN start_time AND end_time)
+             OR (? BETWEEN start_time AND end_time)
+             OR (start_time BETWEEN ? AND ?)
+             OR (end_time BETWEEN ? AND ?))
     """, (staff_id, date, start, end, start, end, start, end))
     return cur.fetchone() is not None
 
@@ -247,13 +267,27 @@ elif choice.startswith("🧑‍⚕️"):
     with st.form("add_patient", clear_on_submit=True):
         p_id = st.text_input("Patient ID (unique)")
         p_name = st.text_input("Full name")
-        p_dob = st.date_input("DOB", value=date(2000,1,1), min_value=date(1900,1,1))
+        p_dob = st.date_input("DOB", value=date(2000,1,1), min_value=date(1900,1,1), max_value=date.today())
         p_gender = st.selectbox("Gender", ["Female","Male","Other"])
+        p_phone = st.text_input("Phone (optional)")
+        p_email = st.text_input("Email (optional)")
+        p_address = st.text_input("Address (optional)")
+        p_emergency = st.text_input("Emergency contact (optional)")
+        p_ins_provider = st.text_input("Insurance provider (optional)")
+        p_ins_number = st.text_input("Insurance policy number (optional)")
+        p_payment_type = st.selectbox("Payment type", ["Insurance","Cash","Other"])
+        p_allergies = st.text_area("Allergies (medicines/food). List or 'None'", height=50)
+        p_meds = st.text_area("Current medications (or 'None')", height=50)
+        p_diagnosis = st.text_area("Diagnosis (brief)", height=50)
+        p_chief = st.text_area("Chief complaint", height=50)
+        p_drug_hist = st.text_area("Drug history (e.g., adverse reactions)", height=50)
+        p_past_med = st.text_area("Past medical history", height=50)
+        p_past_surg = st.text_area("Past surgical history", height=50)
         submitted = st.form_submit_button("Add")
         if submitted and p_id:
             cur = conn.cursor()
-            cur.execute("INSERT OR REPLACE INTO patients (id,name,dob,gender,created_by,created_at) VALUES (?,?,?,?,?,?)",
-                        (p_id,p_name,p_dob.isoformat(),p_gender,st.session_state.user,now_iso()))
+            cur.execute("INSERT OR REPLACE INTO patients (id,name,dob,gender,phone,email,address,emergency_contact,insurance_provider,insurance_number,payment_type,allergies,meds,diagnosis,chief_complaint,drug_history,past_medical_history,past_surgical_history,equipment_required,mobility,care_plan,notes,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (p_id,p_name,p_dob.isoformat(),p_gender,p_phone,p_email,p_address,p_emergency,p_ins_provider,p_ins_number,p_payment_type,p_allergies,p_meds,p_diagnosis,p_chief,p_drug_hist,p_past_med,p_past_surg,None,None,None,None,st.session_state.user,now_iso()))
             conn.commit()
             st.success("Patient added")
             st.rerun()
@@ -271,11 +305,13 @@ elif choice.startswith("👩"):
         s_id = st.text_input("Staff ID (unique)")
         s_name = st.text_input("Full name")
         s_role = st.selectbox("Role", STAFF_ROLES)
+        s_license = st.text_input("License number (optional)")
+        s_specialties = st.text_input("Specialties (comma separated)")
         submitted = st.form_submit_button("Add")
         if submitted and s_id:
             cur = conn.cursor()
-            cur.execute("INSERT OR REPLACE INTO staff (id,name,role,created_by,created_at) VALUES (?,?,?,?,?)",
-                        (s_id,s_name,s_role,st.session_state.user,now_iso()))
+            cur.execute("INSERT OR REPLACE INTO staff (id,name,role,license_number,specialties,phone,email,availability,notes,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (s_id,s_name,s_role,s_license,s_specialties,None,None,None,None,st.session_state.user,now_iso()))
             conn.commit()
             st.success("Staff added")
             st.rerun()
@@ -291,37 +327,83 @@ elif choice.startswith("📅"):
 
     with st.form("add_visit", clear_on_submit=True):
         patient_sel = st.selectbox("Patient", patients['id'].tolist() if not patients.empty else [])
-        staff_sel = st.selectbox("Staff", staff['id'].tolist() if not staff.empty else [])
+        # Allow the user to choose a team; ensure initial visit includes a specialist automatically
+        staff_options = staff['id'].tolist() if not staff.empty else []
+        team_sel = st.multiselect("Visit team (select one or more staff IDs)", options=staff_options)
         v_date = st.date_input("Date", value=date.today())
         start = st.time_input("Start", value=dtime(9,0))
         end = st.time_input("End", value=dtime(10,0))
         v_type = st.text_input("Visit type")
         recurrence = st.selectbox("Recurrence", ["None","Daily","Weekly"])
         submitted = st.form_submit_button("Add Visit")
-        if submitted and patient_sel and staff_sel:
+
+        if submitted and patient_sel:
+            # Ensure DOB and patient exist
+            # Auto-assign specialist for initial visits
+            cur = conn.cursor()
+            cur.execute("SELECT COUNT(*) as c FROM schedule WHERE patient_id = ?", (patient_sel,))
+            prev = cur.fetchone()[0]
+
+            # If no team selected, try to auto-pick appropriate staff
+            if not team_sel:
+                # If initial visit -> assign a Specialist if available
+                if prev == 0:
+                    cur.execute("SELECT id FROM staff WHERE role = 'Specialist' LIMIT 1")
+                    r = cur.fetchone()
+                    if r:
+                        team_sel = [r[0]]
+                else:
+                    # otherwise try to assign GP
+                    cur.execute("SELECT id FROM staff WHERE role = 'GP' LIMIT 1")
+                    r = cur.fetchone()
+                    if r:
+                        team_sel = [r[0]]
+
+            # Ensure initial visit contains a Specialist
+            if prev == 0:
+                # check if any selected staff is Specialist
+                has_spec = False
+                for sid in team_sel:
+                    cur.execute("SELECT role FROM staff WHERE id = ?", (sid,))
+                    rr = cur.fetchone()
+                    if rr and rr[0] == 'Specialist':
+                        has_spec = True
+                        break
+                if not has_spec:
+                    cur.execute("SELECT id FROM staff WHERE role = 'Specialist' LIMIT 1")
+                    r = cur.fetchone()
+                    if r:
+                        team_sel = ([r[0]] if not team_sel else team_sel + [r[0]])
+
+            # Validate times
             if end <= start:
                 st.error("End time must be after start time.")
-            elif is_conflict(staff_sel, v_date.isoformat(), start.strftime("%H:%M"), end.strftime("%H:%M")):
-                st.error("⚠️ Conflict detected! Staff already booked.")
             else:
-                vid = make_visit_id()
-                duration = int((datetime.combine(date.today(), end)-datetime.combine(date.today(), start)).seconds/60)
-                cur = conn.cursor()
-                cur.execute("INSERT OR REPLACE INTO schedule (visit_id,patient_id,staff_id,date,start_time,end_time,visit_type,duration_minutes,created_by,created_at,recurrence) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                            (vid,patient_sel,staff_sel,v_date.isoformat(),start.strftime("%H:%M"),end.strftime("%H:%M"),v_type,duration,st.session_state.user,now_iso(),recurrence))
-                # Add recurring
-                if recurrence != "None":
-                    for i in range(1,5): # add 4 recurrences
-                        if recurrence == "Daily":
-                            next_date = v_date + timedelta(days=i)
-                        else:
-                            next_date = v_date + timedelta(weeks=i)
-                        vid2 = make_visit_id()
-                        cur.execute("INSERT OR REPLACE INTO schedule (visit_id,patient_id,staff_id,date,start_time,end_time,visit_type,duration_minutes,created_by,created_at,recurrence) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                                    (vid2,patient_sel,staff_sel,next_date.isoformat(),start.strftime("%H:%M"),end.strftime("%H:%M"),v_type,duration,st.session_state.user,now_iso(),recurrence))
-                conn.commit()
-                st.success("Visit(s) added")
-                st.rerun()
+                # For conflict detection, check primary staff (first in team)
+                primary_staff = team_sel[0] if team_sel else None
+                if primary_staff and is_conflict(primary_staff, v_date.isoformat(), start.strftime("%H:%M"), end.strftime("%H:%M")):
+                    st.error("⚠️ Conflict detected! Primary staff already booked.")
+                else:
+                    # Insert visit; staff_id will be primary_staff for legacy fields; team stored as CSV
+                    vid = make_visit_id()
+                    duration = int((datetime.combine(date.today(), end)-datetime.combine(date.today(), start)).seconds/60)
+                    team_csv = ",".join(team_sel) if team_sel else None
+                    cur.execute("INSERT OR REPLACE INTO schedule (visit_id,patient_id,staff_id,date,start_time,end_time,visit_type,duration_minutes,created_by,created_at,recurrence,team) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                (vid,patient_sel,primary_staff,v_date.isoformat(),start.strftime("%H:%M"),end.strftime("%H:%M"),v_type,duration,st.session_state.user,now_iso(),recurrence,team_csv))
+                    # Add recurring
+                    if recurrence != "None":
+                        for i in range(1,5): # add 4 recurrences
+                            if recurrence == "Daily":
+                                next_date = v_date + timedelta(days=i)
+                            else:
+                                next_date = v_date + timedelta(weeks=i)
+                            vid2 = make_visit_id()
+                            cur.execute("INSERT OR REPLACE INTO schedule (visit_id,patient_id,staff_id,date,start_time,end_time,visit_type,duration_minutes,created_by,created_at,recurrence,team) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                                        (vid2,patient_sel,primary_staff,next_date.isoformat(),start.strftime("%H:%M"),end.strftime("%H:%M"),v_type,duration,st.session_state.user,now_iso(),recurrence,team_csv))
+                    conn.commit()
+                    st.success("Visit(s) added")
+                    st.rerun()
+
     st.dataframe(sched)
     render_footer()
 
