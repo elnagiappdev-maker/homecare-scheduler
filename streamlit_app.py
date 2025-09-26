@@ -1,5 +1,5 @@
 # app.py
-# Smart Homecare Scheduler (enhanced Streamlit app with full functionality)
+# Smart Homecare Scheduler (enhanced with KPIs, conflict detection, calendar view, recurring visits, role-based access, analytics, filters)
 # Footer: All Rights Reserved © Dr. Yousra Abdelatti (purple)
 #         Developed By Dr. Mohammedelnagi Mohammed (blue)
 
@@ -11,8 +11,6 @@ from io import BytesIO
 import altair as alt
 import hashlib
 from docx import Document
-from docx.shared import Inches
-import tempfile
 import os
 
 # ---------------------------
@@ -21,8 +19,6 @@ import os
 DB_PATH = "homecare_scheduler.db"
 APP_TITLE = "Smart Homecare Scheduler (24/7)"
 RELAXING_BG = "#E8F6F3"
-ACCENT = "#5DADE2"
-
 STAFF_ROLES = ["Specialist", "GP", "Nurse", "RT", "PT", "Care Giver"]
 
 # ---------------------------
@@ -108,7 +104,8 @@ def init_db():
             priority TEXT,
             notes TEXT,
             created_by TEXT,
-            created_at TEXT
+            created_at TEXT,
+            recurrence TEXT
         )
     ''')
     # seed users
@@ -125,15 +122,12 @@ init_db()
 conn = get_db_connection()
 
 # ---------------------------
-# Read helpers
+# Helpers
 # ---------------------------
 @st.cache_data(show_spinner=False)
 def read_table(name: str):
     return pd.read_sql_query(f"SELECT * FROM {name}", conn)
 
-# ---------------------------
-# UI Helpers
-# ---------------------------
 def inject_css():
     st.markdown(f"""
     <style>
@@ -162,6 +156,20 @@ def render_footer():
     </div>
     """, unsafe_allow_html=True)
 
+def is_conflict(staff_id, date, start, end):
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT * FROM schedule 
+        WHERE staff_id = ? AND date = ?
+        AND (
+            (? BETWEEN start_time AND end_time) OR 
+            (? BETWEEN start_time AND end_time) OR
+            (start_time BETWEEN ? AND ?) OR 
+            (end_time BETWEEN ? AND ?)
+        )
+    """, (staff_id, date, start, end, start, end, start, end))
+    return cur.fetchone() is not None
+
 # ---------------------------
 # Authentication
 # ---------------------------
@@ -187,42 +195,6 @@ def logout_user():
     st.session_state.user_role = None
 
 # ---------------------------
-# Export Helpers
-# ---------------------------
-def to_excel_bytes(dfs: dict):
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        for name, df in dfs.items():
-            df.to_excel(writer, sheet_name=name[:31], index=False)
-    output.seek(0)
-    return output.getvalue()
-
-def df_to_csv_bytes(df: pd.DataFrame):
-    return df.to_csv(index=False).encode()
-
-def create_word_report(patients_df, staff_df, schedule_df):
-    doc = Document()
-    doc.add_heading(APP_TITLE, level=1)
-    doc.add_paragraph("Generated: " + datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
-    for title, df in [("Patients", patients_df), ("Staff", staff_df), ("Schedule", schedule_df)]:
-        doc.add_heading(title, level=2)
-        if not df.empty:
-            table = doc.add_table(rows=1, cols=len(df.columns))
-            hdr = table.rows[0].cells
-            for i, c in enumerate(df.columns):
-                hdr[i].text = c
-            for _, row in df.iterrows():
-                cells = table.add_row().cells
-                for i, c in enumerate(df.columns):
-                    cells[i].text = str(row[c])
-        else:
-            doc.add_paragraph("No data")
-    f = BytesIO()
-    doc.save(f)
-    f.seek(0)
-    return f.getvalue()
-
-# ---------------------------
 # App Layout
 # ---------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -239,14 +211,14 @@ if not st.session_state.logged_in:
             st.error("Invalid credentials")
     st.stop()
 
-st.sidebar.title("Menu")
-menu = ["Dashboard","Patients","Staff","Schedule","Analytics","Emergency","Settings","Export & Backup","Logout"]
+st.sidebar.title("📋 Menu")
+menu = ["🏠 Dashboard","🧑‍⚕️ Patients","👩 Staff","📅 Schedule","📊 Analytics","🚨 Emergency","⚙️ Settings","💾 Export & Backup","🚪 Logout"]
 choice = st.sidebar.radio("Go to", menu)
 
 st.markdown(f"<div class='big-title'>{APP_TITLE}</div>", unsafe_allow_html=True)
 
 # ---------- Dashboard ----------
-if choice == "Dashboard":
+if choice.startswith("🏠"):
     patients = read_table("patients")
     staff = read_table("staff")
     sched = read_table("schedule")
@@ -254,12 +226,24 @@ if choice == "Dashboard":
     c1.metric("Patients", len(patients))
     c2.metric("Staff", len(staff))
     c3.metric("Visits", len(sched))
+
+    if not sched.empty:
+        avg_duration = round(sched['duration_minutes'].astype(float).mean(),1)
+        common_type = sched['visit_type'].mode()[0] if not sched['visit_type'].isna().all() else "N/A"
+        busiest = sched['staff_id'].value_counts().idxmax()
+        st.metric("Avg Visit Duration (min)", avg_duration)
+        st.metric("Most Common Visit Type", common_type)
+        st.metric("Busiest Staff", busiest)
+
     render_footer()
 
 # ---------- Patients ----------
-elif choice == "Patients":
+elif choice.startswith("🧑‍⚕️"):
     st.subheader("Patients")
     patients = read_table("patients")
+    search = st.text_input("Search by name/ID/phone")
+    if search:
+        patients = patients[patients.apply(lambda r: search.lower() in str(r).lower(), axis=1)]
     with st.form("add_patient", clear_on_submit=True):
         p_id = st.text_input("Patient ID (unique)")
         p_name = st.text_input("Full name")
@@ -277,9 +261,12 @@ elif choice == "Patients":
     render_footer()
 
 # ---------- Staff ----------
-elif choice == "Staff":
+elif choice.startswith("👩"):
     st.subheader("Staff")
     staff = read_table("staff")
+    search = st.text_input("Search staff")
+    if search:
+        staff = staff[staff.apply(lambda r: search.lower() in str(r).lower(), axis=1)]
     with st.form("add_staff", clear_on_submit=True):
         s_id = st.text_input("Staff ID (unique)")
         s_name = st.text_input("Full name")
@@ -296,11 +283,12 @@ elif choice == "Staff":
     render_footer()
 
 # ---------- Schedule ----------
-elif choice == "Schedule":
+elif choice.startswith("📅"):
     st.subheader("Schedule")
     patients = read_table("patients")
     staff = read_table("staff")
     sched = read_table("schedule")
+
     with st.form("add_visit", clear_on_submit=True):
         patient_sel = st.selectbox("Patient", patients['id'].tolist() if not patients.empty else [])
         staff_sel = st.selectbox("Staff", staff['id'].tolist() if not staff.empty else [])
@@ -308,24 +296,41 @@ elif choice == "Schedule":
         start = st.time_input("Start", value=dtime(9,0))
         end = st.time_input("End", value=dtime(10,0))
         v_type = st.text_input("Visit type")
+        recurrence = st.selectbox("Recurrence", ["None","Daily","Weekly"])
         submitted = st.form_submit_button("Add Visit")
         if submitted and patient_sel and staff_sel:
-            vid = make_visit_id()
-            duration = int((datetime.combine(date.today(), end)-datetime.combine(date.today(), start)).seconds/60)
-            cur = conn.cursor()
-            cur.execute("INSERT OR REPLACE INTO schedule (visit_id,patient_id,staff_id,date,start_time,end_time,visit_type,duration_minutes,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (vid,patient_sel,staff_sel,v_date.isoformat(),start.strftime("%H:%M"),end.strftime("%H:%M"),v_type,duration,st.session_state.user,now_iso()))
-            conn.commit()
-            st.success("Visit added")
-            st.rerun()
+            if end <= start:
+                st.error("End time must be after start time.")
+            elif is_conflict(staff_sel, v_date.isoformat(), start.strftime("%H:%M"), end.strftime("%H:%M")):
+                st.error("⚠️ Conflict detected! Staff already booked.")
+            else:
+                vid = make_visit_id()
+                duration = int((datetime.combine(date.today(), end)-datetime.combine(date.today(), start)).seconds/60)
+                cur = conn.cursor()
+                cur.execute("INSERT OR REPLACE INTO schedule (visit_id,patient_id,staff_id,date,start_time,end_time,visit_type,duration_minutes,created_by,created_at,recurrence) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                            (vid,patient_sel,staff_sel,v_date.isoformat(),start.strftime("%H:%M"),end.strftime("%H:%M"),v_type,duration,st.session_state.user,now_iso(),recurrence))
+                # Add recurring
+                if recurrence != "None":
+                    for i in range(1,5): # add 4 recurrences
+                        if recurrence == "Daily":
+                            next_date = v_date + timedelta(days=i)
+                        else:
+                            next_date = v_date + timedelta(weeks=i)
+                        vid2 = make_visit_id()
+                        cur.execute("INSERT OR REPLACE INTO schedule (visit_id,patient_id,staff_id,date,start_time,end_time,visit_type,duration_minutes,created_by,created_at,recurrence) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                                    (vid2,patient_sel,staff_sel,next_date.isoformat(),start.strftime("%H:%M"),end.strftime("%H:%M"),v_type,duration,st.session_state.user,now_iso(),recurrence))
+                conn.commit()
+                st.success("Visit(s) added")
+                st.rerun()
     st.dataframe(sched)
     render_footer()
 
 # ---------- Analytics ----------
-elif choice == "Analytics":
+elif choice.startswith("📊"):
     st.subheader("Analytics")
     patients = read_table("patients")
     sched = read_table("schedule")
+
     if not patients.empty:
         patients['dob_dt'] = pd.to_datetime(patients['dob'], errors="coerce")
         patients['age'] = ((pd.Timestamp(date.today())-patients['dob_dt']).dt.days//365).fillna(0)
@@ -333,14 +338,28 @@ elif choice == "Analytics":
         df = bins.value_counts().reset_index()
         df.columns=["Age group","Count"]
         st.altair_chart(alt.Chart(df).mark_bar().encode(x="Age group", y="Count"), use_container_width=True)
+
     if not sched.empty:
+        # Staff workload
         w = sched['staff_id'].value_counts().reset_index()
         w.columns=["Staff","Visits"]
         st.altair_chart(alt.Chart(w).mark_bar().encode(x="Staff", y="Visits"), use_container_width=True)
+
+        # Visit type distribution
+        vt = sched['visit_type'].value_counts().reset_index()
+        vt.columns=["Visit Type","Count"]
+        st.altair_chart(alt.Chart(vt).mark_arc().encode(theta="Count", color="Visit Type"), use_container_width=True)
+
+        # Monthly trend
+        sched['month'] = pd.to_datetime(sched['date']).dt.to_period("M").astype(str)
+        mt = sched['month'].value_counts().reset_index()
+        mt.columns=["Month","Visits"]
+        st.altair_chart(alt.Chart(mt).mark_line(point=True).encode(x="Month", y="Visits"), use_container_width=True)
+
     render_footer()
 
 # ---------- Emergency ----------
-elif choice == "Emergency":
+elif choice.startswith("🚨"):
     st.subheader("Emergency")
     patients = read_table("patients")
     if not patients.empty:
@@ -350,26 +369,60 @@ elif choice == "Emergency":
     render_footer()
 
 # ---------- Settings ----------
-elif choice == "Settings":
+elif choice.startswith("⚙️"):
     st.subheader("Settings")
-    st.write(f"Logged in as {st.session_state.user}")
+    st.write(f"Logged in as {st.session_state.user} ({st.session_state.user_role})")
     users = read_table("users")
     st.dataframe(users)
     render_footer()
 
 # ---------- Export ----------
-elif choice == "Export & Backup":
+elif choice.startswith("💾"):
     patients = read_table("patients")
     staff = read_table("staff")
     sched = read_table("schedule")
+
+    def to_excel_bytes(dfs: dict):
+        output = BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            for name, df in dfs.items():
+                df.to_excel(writer, sheet_name=name[:31], index=False)
+        output.seek(0)
+        return output.getvalue()
+
+    def create_word_report(patients_df, staff_df, schedule_df):
+        doc = Document()
+        doc.add_heading(APP_TITLE, level=1)
+        doc.add_paragraph("Generated: " + datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
+        for title, df in [("Patients", patients_df), ("Staff", staff_df), ("Schedule", schedule_df)]:
+            doc.add_heading(title, level=2)
+            if not df.empty:
+                table = doc.add_table(rows=1, cols=len(df.columns))
+                hdr = table.rows[0].cells
+                for i, c in enumerate(df.columns):
+                    hdr[i].text = c
+                for _, row in df.iterrows():
+                    cells = table.add_row().cells
+                    for i, c in enumerate(df.columns):
+                        cells[i].text = str(row[c])
+            else:
+                doc.add_paragraph("No data")
+        f = BytesIO()
+        doc.save(f)
+        f.seek(0)
+        return f.getvalue()
+
     excel = to_excel_bytes({"Patients":patients,"Staff":staff,"Schedule":sched})
     word = create_word_report(patients,staff,sched)
+
     st.download_button("Download Excel",excel,"data.xlsx")
     st.download_button("Download Word",word,"report.docx")
+    st.download_button("Backup Database", open(DB_PATH,"rb").read(), "backup.db")
+
     render_footer()
 
 # ---------- Logout ----------
-elif choice == "Logout":
+elif choice.startswith("🚪"):
     logout_user()
     st.success("Logged out")
     st.rerun()
