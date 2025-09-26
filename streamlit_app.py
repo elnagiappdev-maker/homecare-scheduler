@@ -263,7 +263,7 @@ elif choice == "Patients":
     with st.form("add_patient", clear_on_submit=True):
         p_id = st.text_input("Patient ID (unique)")
         p_name = st.text_input("Full name")
-        p_dob = st.date_input("DOB", max_value=date.today())
+        p_dob = st.date_input("DOB", value=date(2000,1,1), min_value=date(1900,1,1))
         p_gender = st.selectbox("Gender", ["Female","Male","Other"])
         submitted = st.form_submit_button("Add")
         if submitted and p_id:
