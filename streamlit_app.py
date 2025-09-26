@@ -23,6 +23,8 @@ APP_TITLE = "Smart Homecare Scheduler (24/7)"
 RELAXING_BG = "#E8F6F3"
 ACCENT = "#5DADE2"
 
+STAFF_ROLES = ["Specialist", "GP", "Nurse", "RT", "PT", "Care Giver"]
+
 # ---------------------------
 # Utilities
 # ---------------------------
@@ -281,7 +283,7 @@ elif choice == "Staff":
     with st.form("add_staff", clear_on_submit=True):
         s_id = st.text_input("Staff ID (unique)")
         s_name = st.text_input("Full name")
-        s_role = st.text_input("Role")
+        s_role = st.selectbox("Role", STAFF_ROLES)
         submitted = st.form_submit_button("Add")
         if submitted and s_id:
             cur = conn.cursor()
