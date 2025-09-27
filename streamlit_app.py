@@ -1,5 +1,5 @@
 # app.py
-# Smart Homecare Scheduler (Streamlit App) - Fixed save issues
+# Smart Homecare Scheduler (Streamlit App) - Single-file updated
 # All Rights Reserved © Dr. Yousra Abdelatti
 
 import streamlit as st
@@ -178,7 +178,7 @@ def init_db():
 
     db_commit_and_close(conn)
 
-# Initialize DB
+# Ensure DB exists
 init_db()
 
 # ---------------------------
@@ -358,22 +358,23 @@ def create_word_report(patients_df, staff_df, schedule_df, charts_png: dict = No
     return f.getvalue()
 
 # ---------------------------
-# Page config + login UI
+# Page config + login UI (single-click)
 # ---------------------------
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 if not st.session_state.get("logged_in", False):
     st.markdown('<div class="big-title">Smart Homecare Scheduler — Login</div>', unsafe_allow_html=True)
-    col1, col2 = st.columns([1, 1])
-    with col1:
+    with st.form("login_form"):
         username = st.text_input("Username", key="login_user")
         password = st.text_input("Password", type="password", key="login_pw")
-        if st.button("Login"):
+        submitted = st.form_submit_button("Login")
+        if submitted:
             ok = login_user(username, password)
             if ok:
                 st.success(f"Welcome back, {st.session_state.user} ({st.session_state.role})")
                 st.experimental_rerun()
             else:
                 st.error("Invalid credentials")
+    col1, col2 = st.columns([1, 1])
     with col2:
         st.write("Demo accounts: admin / 1234  •  doctor / abcd")
         st.write("If you don't have an account ask the administrator to create one.")
@@ -442,28 +443,28 @@ elif choice == "Patients":
 
     with st.expander("Add New Patient (full file)", expanded=True):
         with st.form("add_patient_form", clear_on_submit=True):
-            p_id = st.text_input("Patient ID (unique)")
-            p_name = st.text_input("Name")
-            p_dob = st.date_input("Date of Birth", min_value=date(1900, 1, 1))
-            p_gender = st.selectbox("Gender", ["Female", "Male", "Other", "Prefer not to say"])
-            p_address = st.text_area("Address")
-            p_phone = st.text_input("Contact Number")
-            p_emergency = st.text_input("Emergency Contact")
+            p_id = st.text_input("Patient ID (unique)", key="new_patient_id")
+            p_name = st.text_input("Name", key="new_patient_name")
+            p_dob = st.date_input("Date of Birth", min_value=date(1900, 1, 1), key="new_patient_dob")
+            p_gender = st.selectbox("Gender", ["Female", "Male", "Other", "Prefer not to say"], key="new_patient_gender")
+            p_address = st.text_area("Address", key="new_patient_address")
+            p_phone = st.text_input("Contact Number", key="new_patient_phone")
+            p_emergency = st.text_input("Emergency Contact", key="new_patient_emergency")
 
-            p_diagnosis = st.text_area("Primary Diagnosis")
-            p_pmh = st.text_area("Past Medical History")
-            p_allergies = st.text_area("Allergies")
-            p_medications = st.text_area("Medications")
-            p_physician = st.text_input("Physician")
+            p_diagnosis = st.text_area("Primary Diagnosis", key="new_patient_diag")
+            p_pmh = st.text_area("Past Medical History", key="new_patient_pmh")
+            p_allergies = st.text_area("Allergies", key="new_patient_allergies")
+            p_medications = st.text_area("Medications", key="new_patient_meds")
+            p_physician = st.text_input("Physician", key="new_patient_physician")
 
-            p_care_type = st.text_input("Type of Care")
-            p_care_frequency = st.text_input("Frequency")
-            p_care_needs = st.text_area("Specific Needs")
+            p_care_type = st.text_input("Type of Care", key="new_patient_care_type")
+            p_care_frequency = st.text_input("Frequency", key="new_patient_care_freq")
+            p_care_needs = st.text_area("Specific Needs", key="new_patient_care_needs")
 
-            p_mobility = st.selectbox("Mobility", ["Independent", "Assisted", "Wheelchair", "Bedbound"])
-            p_cognition = st.text_area("Cognition")
-            p_nutrition = st.text_area("Nutrition")
-            p_psychosocial = st.text_area("Psychosocial")
+            p_mobility = st.selectbox("Mobility", ["Independent", "Assisted", "Wheelchair", "Bedbound"], key="new_patient_mobility")
+            p_cognition = st.text_area("Cognition", key="new_patient_cognition")
+            p_nutrition = st.text_area("Nutrition", key="new_patient_nutrition")
+            p_psychosocial = st.text_area("Psychosocial", key="new_patient_psychosocial")
 
             custom_values = {}
             if custom_fields:
@@ -472,9 +473,8 @@ elif choice == "Patients":
                     key = f"custom_{cf['id']}"
                     custom_values[key] = st.text_input(cf['field_name'], key=key)
 
-            p_notes = st.text_area("Notes / Social History")
+            p_notes = st.text_area("Notes / Social History", key="new_patient_notes")
             submitted = st.form_submit_button("Save Patient")
-
             if submitted:
                 if not p_id or not p_name:
                     st.error("Patient ID and Name are required.")
@@ -506,6 +506,56 @@ elif choice == "Patients":
     st.markdown("---")
     st.write("Existing patients (table):")
     st.dataframe(patients_df)
+
+    # Edit / Delete patient (admin or creator)
+    if not patients_df.empty:
+        st.markdown("### Edit / Delete patient")
+        sel = st.selectbox("Select patient to edit", patients_df['id'].tolist(), key="edit_patient_select")
+        row = patients_df[patients_df['id'] == sel].iloc[0]
+        can_edit = (st.session_state.role == "admin") or (row.get("created_by") == st.session_state.user)
+        if not can_edit:
+            st.info("You can view this patient's record but only the admin or the creator can edit/delete it.")
+        with st.form("edit_patient_form", clear_on_submit=False):
+            e_name = st.text_input("Name", value=row['name'])
+            dob_val = pd.to_datetime(row['dob'], errors='coerce')
+            e_dob = st.date_input("DOB", value=dob_val.date() if pd.notna(dob_val) else date.today())
+            e_gender = st.selectbox("Gender", ["Female", "Male", "Other", "Prefer not to say"], index=0)
+            e_address = st.text_area("Address", value=row['address'])
+            e_phone = st.text_input("Contact Number", value=row['phone'])
+            e_emergency = st.text_input("Emergency Contact", value=row['emergency_contact'])
+
+            e_diag = st.text_area("Primary Diagnosis", value=row['diagnosis'])
+            e_pmh = st.text_area("Past Medical History", value=row['pmh'])
+            e_allergies = st.text_area("Allergies", value=row['allergies'])
+            e_meds = st.text_area("Medications", value=row['medications'])
+            e_phys = st.text_input("Physician", value=row['physician'])
+
+            e_care_type = st.text_input("Type of Care", value=row['care_type'])
+            e_care_freq = st.text_input("Frequency", value=row['care_frequency'])
+            e_care_needs = st.text_area("Specific Needs", value=row['care_needs'])
+
+            e_mobility = st.selectbox("Mobility", ["Independent", "Assisted", "Wheelchair", "Bedbound"], index=0)
+            e_cognition = st.text_area("Cognition", value=row['cognition'])
+            e_nutrition = st.text_area("Nutrition", value=row['nutrition'])
+            e_psycho = st.text_area("Psychosocial", value=row['psychosocial'])
+
+            if st.session_state.role == "admin" or row.get("created_by") == st.session_state.user:
+                submitted_edit = st.form_submit_button("Save changes")
+                if submitted_edit:
+                    conn_write = get_conn(); cur = conn_write.cursor()
+                    cur.execute("""
+                        UPDATE patients SET name=?, dob=?, gender=?, phone=?, address=?, emergency_contact=?, diagnosis=?, pmh=?, allergies=?, medications=?, physician=?, care_type=?, care_frequency=?, care_needs=?, mobility=?, cognition=?, nutrition=?, psychosocial=?, notes=?
+                        WHERE id=?
+                    """, (e_name, e_dob.isoformat(), e_gender, e_phone, e_address, e_emergency, e_diag, e_pmh, e_allergies, e_meds, e_phys, e_care_type, e_care_freq, e_care_needs, e_mobility, e_cognition, e_nutrition, e_psycho, row['notes'], sel))
+                    db_commit_and_close(conn_write)
+                    st.success("Patient updated")
+                    st.experimental_rerun()
+                if st.button("Delete patient"):
+                    conn_write = get_conn(); cur = conn_write.cursor()
+                    cur.execute("DELETE FROM patients WHERE id=?", (sel,))
+                    db_commit_and_close(conn_write)
+                    st.success("Patient deleted")
+                    st.experimental_rerun()
 
     # Vitals
     st.markdown("### Vital Signs Record (add / view)")
@@ -567,13 +617,13 @@ elif choice == "Staff":
     staff_df = read_table("staff")
 
     with st.form("add_staff_form", clear_on_submit=True):
-        s_id = st.text_input("Staff ID (unique)")
-        s_name = st.text_input("Full name")
-        s_role = st.selectbox("Role", STAFF_ROLES)
-        s_phone = st.text_input("Phone")
-        s_email = st.text_input("Email")
-        s_availability = st.text_area("Availability (e.g. Mon-Fri 08:00-16:00)")
-        s_notes = st.text_area("Notes")
+        s_id = st.text_input("Staff ID (unique)", key="new_staff_id")
+        s_name = st.text_input("Full name", key="new_staff_name")
+        s_role = st.selectbox("Role", STAFF_ROLES, key="new_staff_role")
+        s_phone = st.text_input("Phone", key="new_staff_phone")
+        s_email = st.text_input("Email", key="new_staff_email")
+        s_availability = st.text_area("Availability (e.g. Mon-Fri 08:00-16:00)", key="new_staff_avail")
+        s_notes = st.text_area("Notes", key="new_staff_notes")
         if st.form_submit_button("Save staff"):
             if not s_id or not s_name:
                 st.error("Staff ID and name required")
@@ -590,6 +640,39 @@ elif choice == "Staff":
     st.markdown("---")
     st.write("Existing staff:")
     st.dataframe(staff_df)
+
+    # Edit / Delete staff (admin or creator)
+    if not staff_df.empty:
+        st.markdown("### Edit / Delete staff")
+        sel_staff = st.selectbox("Select staff to edit", staff_df['id'].tolist(), key="edit_staff_select")
+        row = staff_df[staff_df['id'] == sel_staff].iloc[0]
+        can_edit_staff = (st.session_state.role == "admin") or (row.get("created_by") == st.session_state.user)
+        if not can_edit_staff:
+            st.info("You can view this staff record but only the admin or the creator can edit/delete it.")
+        with st.form("edit_staff_form", clear_on_submit=False):
+            es_name = st.text_input("Name", value=row['name'])
+            es_role = st.selectbox("Role", STAFF_ROLES, index=STAFF_ROLES.index(row['role']) if row['role'] in STAFF_ROLES else 0)
+            es_phone = st.text_input("Phone", value=row['phone'])
+            es_email = st.text_input("Email", value=row['email'])
+            es_avail = st.text_area("Availability", value=row['availability'])
+            es_notes = st.text_area("Notes", value=row['notes'])
+            if can_edit_staff:
+                if st.form_submit_button("Save staff changes"):
+                    conn_write = get_conn(); cur = conn_write.cursor()
+                    cur.execute("""
+                        UPDATE staff SET name=?, role=?, phone=?, email=?, availability=?, notes=?
+                        WHERE id=?
+                    """, (es_name, es_role, es_phone, es_email, es_avail, es_notes, sel_staff))
+                    db_commit_and_close(conn_write)
+                    st.success("Staff updated")
+                    st.experimental_rerun()
+                if st.button("Delete staff"):
+                    conn_write = get_conn(); cur = conn_write.cursor()
+                    cur.execute("DELETE FROM staff WHERE id=?", (sel_staff,))
+                    db_commit_and_close(conn_write)
+                    st.success("Staff deleted")
+                    st.experimental_rerun()
+
     render_footer()
 
 # ---------- SCHEDULE ----------
@@ -613,9 +696,9 @@ elif choice == "Schedule":
             visit_date = st.date_input("Date", value=date.today())
             start = st.time_input("Start", value=dtime(hour=9, minute=0))
             end = st.time_input("End", value=dtime(hour=10, minute=0))
-            visit_type = st.selectbox("Visit type", ["Home visit", "Telehealth", "Wound care", "Medication administration", "Physiotherapy", "Respiratory therapy", "Assessment", "Other"])
-            priority = st.selectbox("Priority", ["Low", "Normal", "High", "Critical"])
-            notes = st.text_area("Notes / visit plan")
+            visit_type = st.selectbox("Visit type", ["Home visit", "Telehealth", "Wound care", "Medication administration", "Physiotherapy", "Respiratory therapy", "Assessment", "Other"], key="sch_vtype")
+            priority = st.selectbox("Priority", ["Low", "Normal", "High", "Critical"], key="sch_priority")
+            notes = st.text_area("Notes / visit plan", key="sch_notes")
             if st.form_submit_button("Create visit"):
                 if not patient_sel or not staff_sel:
                     st.error("Select patient and staff")
@@ -664,7 +747,15 @@ elif choice == "Analytics":
         age_bins = pd.cut(patients_df['age'], bins=[-1, 0, 1, 18, 40, 65, 200], labels=["<1", "1-17", "18-39", "40-64", "65+"])
         age_count = age_bins.value_counts().sort_index().reset_index()
         age_count.columns = ['age_group', 'count']
-        st.altair_chart(alt.Chart(age_count).mark_bar(color=ACCENT).encode(x='age_group', y='count'), use_container_width=True)
+        chart_age = alt.Chart(age_count).mark_bar(color=ACCENT).encode(x='age_group', y='count')
+        st.altair_chart(chart_age, use_container_width=True)
+
+        # allow download of the chart as PNG
+        fig, ax = plt.subplots()
+        age_count.plot(kind="bar", x="age_group", y="count", ax=ax, legend=False, color=ACCENT)
+        buf = BytesIO(); plt.savefig(buf, format="png"); buf.seek(0); plt.close(fig)
+        st.download_button("Download age distribution PNG", data=buf.getvalue(), file_name="age_distribution.png", mime="image/png")
+
     else:
         st.info("No patient data")
 
@@ -672,7 +763,13 @@ elif choice == "Analytics":
     if not schedule_df.empty:
         w = schedule_df['staff_id'].value_counts().reset_index()
         w.columns = ['staff_id', 'visits']
-        st.altair_chart(alt.Chart(w).mark_bar(color="#66c2a5").encode(x='staff_id', y='visits'), use_container_width=True)
+        chart_w = alt.Chart(w).mark_bar(color="#66c2a5").encode(x='staff_id', y='visits')
+        st.altair_chart(chart_w, use_container_width=True)
+
+        fig, ax = plt.subplots()
+        w.plot(kind="bar", x="staff_id", y="visits", ax=ax, legend=False, color="#66c2a5")
+        buf2 = BytesIO(); plt.savefig(buf2, format="png"); buf2.seek(0); plt.close(fig)
+        st.download_button("Download staff workload PNG", data=buf2.getvalue(), file_name="staff_workload.png", mime="image/png")
     else:
         st.info("No schedule data")
 
@@ -755,6 +852,22 @@ elif choice == "Settings":
                         st.success("Password reset")
                     else:
                         st.error("Enter a password")
+            else:
+                st.info("No users found")
+
+        with st.expander("Delete user"):
+            users_df3 = read_table("users")
+            if not users_df3.empty:
+                sel_del = st.selectbox("Select user to delete", users_df3['username'].tolist(), key="delete_user_select")
+                if sel_del == st.session_state.user:
+                    st.info("You cannot delete your own admin account while logged in.")
+                else:
+                    if st.button("Delete selected user"):
+                        conn_write = get_conn(); cur = conn_write.cursor()
+                        cur.execute("DELETE FROM users WHERE username = ?", (sel_del,))
+                        db_commit_and_close(conn_write)
+                        st.success("User deleted")
+                        st.experimental_rerun()
             else:
                 st.info("No users found")
 
