@@ -1,10 +1,11 @@
+# -*- coding: utf-8 -*-
 # app.py
-# Smart Homecare Scheduler (full restored version)
+# Smart Homecare Scheduler (full restored version, deployment-ready)
 # Footer / branding:
 #   Login page:  All Rights Reserved © Dr. Yousra Abdelatti (purple)
 #   In-app footer: Developed By Dr. Mohammedelnagi Mohammed (small blue)
 #
-# NOTE: After saving this file, add requirements.txt with the packages listed at the bottom comment.
+# NOTE: create requirements.txt (provided below) in the same repo before deploying.
 
 import streamlit as st
 import pandas as pd
@@ -15,6 +16,7 @@ import hashlib
 import os
 import tempfile
 import matplotlib.pyplot as plt
+import altair as alt
 from docx import Document
 from docx.shared import Inches
 
@@ -163,8 +165,7 @@ def make_visit_id():
     count = cur.fetchone()["c"] + 1
     return f"V{count:05d}"
 
-def render_footer(app_footer=True):
-    # App footer shows Developed By in small blue; also repeat All Rights Reserved in the app if requested
+def render_footer():
     st.markdown("---")
     st.markdown(f"<div style='text-align:center;'><span style='font-weight:bold; color:purple;'>All Rights Reserved © Dr. Yousra Abdelatti</span></div>", unsafe_allow_html=True)
     st.markdown(f"<div style='text-align:center;'><span class='small-footer'>Developed By Dr. Mohammedelnagi Mohammed</span></div>", unsafe_allow_html=True)
@@ -189,7 +190,6 @@ def login_user(username, password):
     return False
 
 def logout_user():
-    # preserve theme keys if any
     keys = list(st.session_state.keys())
     for k in keys:
         if k.startswith("theme"):
@@ -229,13 +229,10 @@ def _save_png_from_matplotlib(fig):
     return data
 
 def create_word_report(patients_df, staff_df, schedule_df, charts=None):
-    """
-    charts: dict of title->png_bytes (optional) to embed into the Word doc
-    """
     doc = Document()
     doc.add_heading(APP_TITLE, level=1)
     doc.add_paragraph("Report generated: " + datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
-    # patients table
+    # patients
     doc.add_heading("Patients", level=2)
     if not patients_df.empty:
         table = doc.add_table(rows=1, cols=len(patients_df.columns))
@@ -249,7 +246,7 @@ def create_word_report(patients_df, staff_df, schedule_df, charts=None):
                 row_cells[i].text = "" if pd.isna(val) else str(val)
     else:
         doc.add_paragraph("No patients data.")
-    # staff table
+    # staff
     doc.add_heading("Staff", level=2)
     if not staff_df.empty:
         table = doc.add_table(rows=1, cols=len(staff_df.columns))
@@ -263,7 +260,7 @@ def create_word_report(patients_df, staff_df, schedule_df, charts=None):
                 row_cells[i].text = "" if pd.isna(val) else str(val)
     else:
         doc.add_paragraph("No staff data.")
-    # schedule table
+    # schedule
     doc.add_heading("Schedule", level=2)
     if not schedule_df.empty:
         table = doc.add_table(rows=1, cols=len(schedule_df.columns))
@@ -277,7 +274,7 @@ def create_word_report(patients_df, staff_df, schedule_df, charts=None):
                 row_cells[i].text = "" if pd.isna(val) else str(val)
     else:
         doc.add_paragraph("No schedule data.")
-    # embed charts if provided
+    # embed charts
     if charts:
         for title, png in charts.items():
             doc.add_page_break()
@@ -301,7 +298,7 @@ def create_word_report(patients_df, staff_df, schedule_df, charts=None):
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 inject_css()
 
-# --- Login page (show All Rights Reserved here) ---
+# --- Login page (All Rights Reserved shown here) ---
 if not st.session_state.logged_in:
     st.markdown('<div class="big-title">Smart Homecare Scheduler Login</div>', unsafe_allow_html=True)
     st.markdown("<div style='text-align:center;'><span style='font-weight:bold; color:purple;'>All Rights Reserved © Dr. Yousra Abdelatti</span></div>", unsafe_allow_html=True)
@@ -344,7 +341,7 @@ if choice == "Dashboard":
     st.markdown("---")
     st.write("Upcoming visits (next 30 days):")
     if len(schedule_df) > 0:
-        schedule_df['date_dt'] = pd.to_datetime(schedule_df['date'])
+        schedule_df['date_dt'] = pd.to_datetime(schedule_df['date'], errors='coerce')
         upcoming = schedule_df[(schedule_df['date_dt'] >= pd.Timestamp(date.today())) & (schedule_df['date_dt'] <= pd.Timestamp(date.today()+timedelta(days=30)))]
         upcoming = upcoming.sort_values(['date','start_time']).head(100)
         st.dataframe(upcoming[['visit_id','patient_id','staff_id','date','start_time','end_time','visit_type','priority']])
@@ -717,7 +714,6 @@ elif choice == "Export & Backup":
         excel_bytes = to_excel_bytes({"patients":patients_df, "staff":staff_df, "schedule":schedule_df})
         st.download_button("Download Excel (all)", data=excel_bytes, file_name="homecare_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     with c3:
-        # create a small chart (matplotlib) for embedding into Word
         charts = {}
         try:
             if not patients_df.empty:
@@ -759,7 +755,4 @@ elif choice == "Logout":
         st.success("Logged out")
         st.experimental_rerun()
 
-# fallback footer
-if choice not in ["Logout"]:
-    # already rendered in many places; ensure footer presence
-    pass
+# End of file
