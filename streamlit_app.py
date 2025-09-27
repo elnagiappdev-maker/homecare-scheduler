@@ -1,6 +1,5 @@
 # app.py
-# Smart Homecare Scheduler (Streamlit App)
-# ----------------------------------------
+# Smart Homecare Scheduler (Streamlit App) - Single-file deploy
 # All Rights Reserved © Dr. Yousra Abdelatti
 
 import streamlit as st
@@ -13,273 +12,882 @@ import hashlib
 from docx import Document
 from docx.shared import Inches
 import matplotlib.pyplot as plt
-import tempfile, os
+import tempfile
+import os
 
 # ---------------------------
-# Config
+# Configuration
 # ---------------------------
 DB_PATH = "homecare_scheduler.db"
 APP_TITLE = "Smart Homecare Scheduler (24/7)"
 RELAXING_BG = "#E8F6F3"
+ACCENT = "#5DADE2"
+
 STAFF_ROLES = ["Specialist", "GP", "Nurse", "RT", "PT", "Care Giver"]
 
 # ---------------------------
-# DB Setup
+# Single DB connection (fresh DB mode)
 # ---------------------------
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+# Using one connection object ensures commits affect the same DB used later.
+# This file intentionally recreates/initializes tables fresh (per user's instruction).
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+conn.row_factory = sqlite3.Row
 
-def hash_pw(pw): return hashlib.sha256(pw.encode()).hexdigest()
-def now_iso(): return datetime.utcnow().isoformat()
+def db_commit():
+    conn.commit()
 
+# ---------------------------
+# Helpers: hashing & time
+# ---------------------------
+def hash_pw(pw: str) -> str:
+    return hashlib.sha256(pw.encode()).hexdigest()
+
+def now_iso() -> str:
+    return datetime.utcnow().isoformat()
+
+# ---------------------------
+# Initialize fresh DB (drops nothing but creates tables if missing)
+# ---------------------------
 def init_db():
-    conn = get_conn(); cur = conn.cursor()
+    cur = conn.cursor()
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS users (
-        username TEXT PRIMARY KEY, password_hash TEXT, role TEXT, created_at TEXT)""")
+    # Users
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            username TEXT PRIMARY KEY,
+            password_hash TEXT,
+            role TEXT,
+            created_at TEXT
+        )
+    ''')
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS patients (
-        id TEXT PRIMARY KEY, name TEXT, dob TEXT, gender TEXT, phone TEXT, address TEXT,
-        emergency_contact TEXT, diagnosis TEXT, pmh TEXT, allergies TEXT, medications TEXT,
-        physician TEXT, care_type TEXT, care_frequency TEXT, care_needs TEXT,
-        mobility TEXT, cognition TEXT, nutrition TEXT, psychosocial TEXT, notes TEXT,
-        created_by TEXT, created_at TEXT)""")
+    # Patients - includes all requested patient-file fields
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS patients (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            dob TEXT,
+            gender TEXT,
+            phone TEXT,
+            address TEXT,
+            emergency_contact TEXT,
+            diagnosis TEXT,
+            pmh TEXT,
+            allergies TEXT,
+            medications TEXT,
+            physician TEXT,
+            care_type TEXT,
+            care_frequency TEXT,
+            care_needs TEXT,
+            mobility TEXT,
+            cognition TEXT,
+            nutrition TEXT,
+            psychosocial TEXT,
+            notes TEXT,
+            created_by TEXT,
+            created_at TEXT
+        )
+    ''')
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS staff (
-        id TEXT PRIMARY KEY, name TEXT, role TEXT, phone TEXT, email TEXT,
-        availability TEXT, notes TEXT, created_by TEXT, created_at TEXT)""")
+    # Staff
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS staff (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            role TEXT,
+            phone TEXT,
+            email TEXT,
+            availability TEXT,
+            notes TEXT,
+            created_by TEXT,
+            created_at TEXT
+        )
+    ''')
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS schedule (
-        visit_id TEXT PRIMARY KEY, patient_id TEXT, staff_id TEXT, date TEXT,
-        start_time TEXT, end_time TEXT, visit_type TEXT, duration_minutes INTEGER,
-        priority TEXT, notes TEXT, created_by TEXT, created_at TEXT)""")
+    # Schedule
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS schedule (
+            visit_id TEXT PRIMARY KEY,
+            patient_id TEXT,
+            staff_id TEXT,
+            date TEXT,
+            start_time TEXT,
+            end_time TEXT,
+            visit_type TEXT,
+            duration_minutes INTEGER,
+            priority TEXT,
+            notes TEXT,
+            created_by TEXT,
+            created_at TEXT
+        )
+    ''')
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS vitals (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id TEXT, date TEXT,
-        bp TEXT, hr TEXT, temp TEXT, resp TEXT, o2sat TEXT, weight TEXT, notes TEXT)""")
+    # Vitals (one row per vital-record)
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS vitals (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id TEXT,
+            date TEXT,
+            bp TEXT,
+            hr TEXT,
+            temp TEXT,
+            resp TEXT,
+            o2sat TEXT,
+            weight TEXT,
+            notes TEXT
+        )
+    ''')
 
-    cur.execute("""CREATE TABLE IF NOT EXISTS visit_log (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, patient_id TEXT, date TEXT,
-        caregiver TEXT, visit_type TEXT, services TEXT, response TEXT, signature TEXT)""")
+    # Visit Log (one row per visit log entry)
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS visit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            patient_id TEXT,
+            date TEXT,
+            caregiver TEXT,
+            visit_type TEXT,
+            services TEXT,
+            response TEXT,
+            signature TEXT
+        )
+    ''')
 
+    # Extra fields (admin-created custom sections for patients)
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS extra_fields (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity TEXT,            -- 'patients' (reserved for future: 'staff','schedule')
+            field_name TEXT,
+            field_order INTEGER     -- integer to control ordering
+        )
+    ''')
+
+    # Extra values (store values for custom fields)
+    cur.execute('''
+        CREATE TABLE IF NOT EXISTS extra_values (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            entity TEXT,
+            record_id TEXT,    -- patient id, staff id, or schedule id
+            field_id INTEGER,  -- extra_fields.id
+            value TEXT
+        )
+    ''')
+
+    # Seed default users (admin & doctor)
     cur.execute("SELECT COUNT(*) as c FROM users")
     if cur.fetchone()["c"] == 0:
-        cur.execute("INSERT INTO users VALUES (?,?,?,?)", ("admin", hash_pw("1234"), "admin", now_iso()))
-        cur.execute("INSERT INTO users VALUES (?,?,?,?)", ("doctor", hash_pw("abcd"), "doctor", now_iso()))
+        cur.execute("INSERT INTO users (username,password_hash,role,created_at) VALUES (?,?,?,?)",
+                    ("admin", hash_pw("1234"), "admin", now_iso()))
+        cur.execute("INSERT INTO users (username,password_hash,role,created_at) VALUES (?,?,?,?)",
+                    ("doctor", hash_pw("abcd"), "doctor", now_iso()))
 
-    conn.commit(); conn.close()
+    db_commit()
+
+# create tables
 init_db()
 
 # ---------------------------
-# Helpers
+# Utility functions for reading
 # ---------------------------
 @st.cache_data(show_spinner=False)
-def read_table(name): return pd.read_sql_query(f"SELECT * FROM {name}", get_conn())
+def read_table(name: str) -> pd.DataFrame:
+    return pd.read_sql_query(f"SELECT * FROM {name}", conn)
 
+def make_visit_id() -> str:
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) as c FROM schedule")
+    return f"V{cur.fetchone()['c']+1:05d}"
+
+# ---------------------------
+# CSS + small UI helpers
+# ---------------------------
 def inject_css():
     st.markdown(f"""
     <style>
-    .stApp {{ background: linear-gradient(180deg, {RELAXING_BG} 0%, white 100%); }}
-    .big-title {{ font-size:28px; font-weight:700; color: #0b3d91; }}
-    .footer {{ font-size: 14px; text-align: center; margin-top: 20px; font-weight: bold; color: purple; }}
+    .stApp {{
+        background: linear-gradient(180deg, {RELAXING_BG} 0%, white 100%);
+    }}
+    .big-title {{
+        font-size:28px;
+        font-weight:700;
+        color: #0b3d91;
+    }}
+    .login-bottom {{
+        text-align:center;
+        margin-top: 1rem;
+    }}
+    .footer {{
+        padding:12px 0;
+        text-align:center;
+        font-weight:bold;
+        color:purple;
+    }}
     </style>
     """, unsafe_allow_html=True)
-
-def make_visit_id():
-    cur=get_conn().cursor(); cur.execute("SELECT COUNT(*) as c FROM schedule")
-    return f"V{cur.fetchone()['c']+1:05d}"
 
 def render_footer():
     st.markdown("---")
     st.markdown("<div class='footer'>All Rights Reserved © Dr. Yousra Abdelatti</div>", unsafe_allow_html=True)
 
 # ---------------------------
-# Auth
+# Authentication
 # ---------------------------
 if 'logged_in' not in st.session_state:
-    st.session_state.logged_in, st.session_state.user, st.session_state.role = False, None, None
+    st.session_state.logged_in = False
+    st.session_state.user = None
+    st.session_state.role = None
 
-def login(u,p):
-    cur=get_conn().cursor(); cur.execute("SELECT password_hash, role FROM users WHERE username=?",(u,))
-    row=cur.fetchone()
-    if row and hash_pw(p)==row[0]:
-        st.session_state.logged_in=True; st.session_state.user=u; st.session_state.role=row[1]; return True
+def login_user(username: str, password: str) -> bool:
+    cur = conn.cursor()
+    cur.execute("SELECT password_hash, role FROM users WHERE username = ?", (username,))
+    row = cur.fetchone()
+    if row and hash_pw(password) == row[0]:
+        st.session_state.logged_in = True
+        st.session_state.user = username
+        st.session_state.role = row[1]
+        return True
     return False
-def logout(): st.session_state.logged_in=False; st.session_state.user=None; st.session_state.role=None
+
+def logout_user():
+    st.session_state.logged_in = False
+    st.session_state.user = None
+    st.session_state.role = None
 
 # ---------------------------
-# Word Export
+# Extra-fields helpers (admin-managed custom patient sections)
 # ---------------------------
-def create_word_report(patients, staff, sched, charts=None):
-    doc = Document(); doc.add_heading(APP_TITLE, level=1)
-    doc.add_paragraph("Generated: "+datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
-    for title,df in [("Patients",patients),("Staff",staff),("Schedule",sched)]:
+def get_extra_fields(entity: str = "patients"):
+    cur = conn.cursor()
+    cur.execute("SELECT id, field_name, field_order FROM extra_fields WHERE entity = ? ORDER BY field_order ASC, id ASC", (entity,))
+    rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+def add_extra_field(entity: str, field_name: str, order: int):
+    cur = conn.cursor()
+    cur.execute("INSERT INTO extra_fields (entity, field_name, field_order) VALUES (?,?,?)", (entity, field_name, order))
+    db_commit()
+
+def remove_extra_field(field_id: int):
+    cur = conn.cursor()
+    # remove values referencing this field
+    cur.execute("DELETE FROM extra_values WHERE field_id = ?", (field_id,))
+    cur.execute("DELETE FROM extra_fields WHERE id = ?", (field_id,))
+    db_commit()
+
+def reorder_extra_fields(entity: str, ordered_ids: list):
+    # ordered_ids: list of field ids in new order
+    cur = conn.cursor()
+    for idx, fid in enumerate(ordered_ids):
+        cur.execute("UPDATE extra_fields SET field_order = ? WHERE id = ?", (idx, fid))
+    db_commit()
+
+def upsert_extra_value(entity: str, record_id: str, field_id: int, value: str):
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM extra_values WHERE entity=? AND record_id=? AND field_id=?", (entity, record_id, field_id))
+    r = cur.fetchone()
+    if r:
+        cur.execute("UPDATE extra_values SET value=? WHERE id=?", (value, r["id"]))
+    else:
+        cur.execute("INSERT INTO extra_values (entity, record_id, field_id, value) VALUES (?,?,?,?)", (entity, record_id, field_id, value))
+    db_commit()
+
+def get_extra_values_for_record(entity: str, record_id: str):
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT ef.id as field_id, ef.field_name, ev.value
+        FROM extra_fields ef
+        LEFT JOIN extra_values ev ON ev.field_id = ef.id AND ev.entity = ef.entity AND ev.record_id = ?
+        WHERE ef.entity = ?
+        ORDER BY ef.field_order ASC, ef.id ASC
+    """, (record_id, entity))
+    rows = cur.fetchall()
+    # returns list of dicts: field_id, field_name, value (value may be None)
+    return [dict(r) for r in rows]
+
+# ---------------------------
+# Export helpers (CSV/Excel/Word with charts)
+# ---------------------------
+def to_excel_bytes(dfs: dict) -> bytes:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        for name, df in dfs.items():
+            df.to_excel(writer, sheet_name=name[:31], index=False)
+    output.seek(0)
+    return output.getvalue()
+
+def create_word_report(patients_df, staff_df, schedule_df, charts_png: dict = None) -> bytes:
+    doc = Document()
+    doc.add_heading(APP_TITLE, level=1)
+    doc.add_paragraph("Report generated: " + datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
+
+    for title, df in [("Patients", patients_df), ("Staff", staff_df), ("Schedule", schedule_df)]:
         doc.add_heading(title, level=2)
         if not df.empty:
-            t=doc.add_table(rows=1, cols=len(df.columns))
-            for i,c in enumerate(df.columns): t.rows[0].cells[i].text=c
-            for _,r in df.iterrows(): row_cells=t.add_row().cells; [row_cells[i].__setattr__("text",str(r[c])) for i,c in enumerate(df.columns)]
-        else: doc.add_paragraph("No data")
-    if charts:
-        for title,img in charts.items():
-            doc.add_page_break(); doc.add_heading(title, level=2)
-            with tempfile.NamedTemporaryFile(delete=False,suffix=".png") as tmp:
-                tmp.write(img); tmp.flush(); doc.add_picture(tmp.name,width=Inches(5)); os.unlink(tmp.name)
-    f=BytesIO(); doc.save(f); f.seek(0); return f.getvalue()
+            table = doc.add_table(rows=1, cols=len(df.columns))
+            hdr = table.rows[0].cells
+            for i, col in enumerate(df.columns):
+                hdr[i].text = str(col)
+            for _, r in df.iterrows():
+                cells = table.add_row().cells
+                for i, col in enumerate(df.columns):
+                    val = r[col]
+                    cells[i].text = "" if pd.isna(val) else str(val)
+        else:
+            doc.add_paragraph("No data")
+
+    if charts_png:
+        for title, png in charts_png.items():
+            doc.add_page_break()
+            doc.add_heading(title, level=2)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".png") as tmp:
+                tmp.write(png)
+                tmp.flush()
+                doc.add_picture(tmp.name, width=Inches(6))
+                tmp.close()
+                try:
+                    os.unlink(tmp.name)
+                except Exception:
+                    pass
+
+    f = BytesIO()
+    doc.save(f)
+    f.seek(0)
+    return f.getvalue()
 
 # ---------------------------
-# Layout
+# Page config + CSS
 # ---------------------------
-st.set_page_config(page_title=APP_TITLE, layout="wide"); inject_css()
+st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
+inject_css()
 
+# ---------------------------
+# Login screen
+# ---------------------------
 if not st.session_state.logged_in:
-    st.markdown('<div class="big-title">Login</div>', unsafe_allow_html=True)
-    u=st.text_input("Username"); p=st.text_input("Password",type="password")
-    if st.button("Login"): st.rerun() if login(u,p) else st.error("Invalid credentials")
-    st.markdown("<div class='footer'>All Rights Reserved © Dr. Yousra Abdelatti</div>", unsafe_allow_html=True)
+    st.markdown('<div class="big-title">Smart Homecare Scheduler — Login</div>', unsafe_allow_html=True)
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        username = st.text_input("Username", key="login_user")
+        password = st.text_input("Password", type="password", key="login_pw")
+        if st.button("Login"):
+            ok = login_user(username, password)
+            if ok:
+                st.success(f"Welcome back, {st.session_state.user} ({st.session_state.role})")
+                st.experimental_rerun()
+            else:
+                st.error("Invalid credentials")
+    with col2:
+        st.write("Demo accounts: admin / 1234  •  doctor / abcd")
+        st.write("If you don't have an account ask the administrator to create one.")
+    # All rights reserved on login
+    st.markdown("<div class='login-bottom'><span style='font-weight:bold; color:purple;'>All Rights Reserved © Dr. Yousra Abdelatti</span></div>", unsafe_allow_html=True)
     st.stop()
 
-menu=["Dashboard","Patients","Staff","Schedule","Analytics","Emergency","Settings","Export & Backup","Logout"]
-choice=st.sidebar.radio("Go to",menu); st.markdown(f"<div class='big-title'>{APP_TITLE}</div>",unsafe_allow_html=True)
+# ---------------------------
+# Main menu
+# ---------------------------
+st.sidebar.title("Menu")
+menu = ["Dashboard", "Patients", "Staff", "Schedule", "Analytics", "Emergency", "Settings", "Export & Backup", "Logout"]
+choice = st.sidebar.selectbox("Go to", menu)
 
-# ---------- Patients ----------
-if choice=="Patients":
+st.markdown(f"<div class='big-title'>{APP_TITLE}</div>", unsafe_allow_html=True)
+
+# ---------------------------
+# DASHBOARD
+# ---------------------------
+if choice == "Dashboard":
+    patients_df = read_table("patients")
+    staff_df = read_table("staff")
+    schedule_df = read_table("schedule")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Patients", len(patients_df))
+    c2.metric("Staff", len(staff_df))
+    c3.metric("Scheduled Visits", len(schedule_df))
+
+    st.markdown("---")
+    st.write("Upcoming visits (next 30 days):")
+    if len(schedule_df) > 0:
+        schedule_df['date_dt'] = pd.to_datetime(schedule_df['date'], errors='coerce')
+        upcoming = schedule_df[(schedule_df['date_dt'] >= pd.Timestamp(date.today())) & (schedule_df['date_dt'] <= pd.Timestamp(date.today() + pd.Timedelta(days=30)))]
+        upcoming = upcoming.sort_values(['date', 'start_time']).head(100)
+        st.dataframe(upcoming[['visit_id', 'patient_id', 'staff_id', 'date', 'start_time', 'end_time', 'visit_type', 'priority']])
+    else:
+        st.info("No visits scheduled yet.")
+
+    # Quick mini-charts
+    st.markdown("### Quick analytics")
+    col1, col2 = st.columns(2)
+    with col1:
+        if not patients_df.empty:
+            dfp = patients_df.copy()
+            dfp['dob_dt'] = pd.to_datetime(dfp['dob'], errors='coerce')
+            dfp['age'] = ((pd.Timestamp(date.today()) - dfp['dob_dt']).dt.days // 365).fillna(0).astype(int)
+            age_bins = pd.cut(dfp['age'], bins=[-1, 0, 1, 5, 12, 18, 40, 65, 200], labels=["<1", "1-5", "6-12", "13-18", "19-40", "41-65", "66-200"])
+            age_count = age_bins.value_counts().sort_index().reset_index()
+            age_count.columns = ['age_group', 'count']
+            st.altair_chart(alt.Chart(age_count).mark_bar(color=ACCENT).encode(x='age_group', y='count').properties(height=240), use_container_width=True)
+        else:
+            st.info("Add patients to see age distribution.")
+    with col2:
+        if not schedule_df.empty:
+            vtypes = schedule_df['visit_type'].fillna("Unknown").value_counts().reset_index()
+            vtypes.columns = ['visit_type', 'count']
+            st.altair_chart(alt.Chart(vtypes).mark_arc().encode(theta='count', color='visit_type').properties(height=240), use_container_width=True)
+        else:
+            st.info("No visits to show distribution.")
+    render_footer()
+
+# ---------------------------
+# PATIENTS (full Home Care Patient File)
+# ---------------------------
+elif choice == "Patients":
     st.subheader("🏥 Home Care Patient File")
-    patients=read_table("patients")
 
-    with st.expander("Add New Patient"):
-        with st.form("add_patient",clear_on_submit=True):
-            pid=st.text_input("Patient ID (unique)")
-            name=st.text_input("Name"); dob=st.date_input("Date of Birth",min_value=date(1900,1,1))
-            gender=st.selectbox("Gender",["Female","Male","Other"])
-            phone=st.text_input("Contact Number"); addr=st.text_area("Address")
-            emerg=st.text_input("Emergency Contact"); diag=st.text_area("Primary Diagnosis")
-            pmh=st.text_area("Past Medical History"); allergies=st.text_area("Allergies")
-            meds=st.text_area("Medications"); physician=st.text_input("Physician")
-            care_type=st.text_input("Type of Care"); freq=st.text_input("Frequency"); needs=st.text_area("Specific Needs")
-            mobility=st.selectbox("Mobility",["Independent","Assisted","Wheelchair","Bedbound"])
-            cog=st.text_area("Cognition"); nutri=st.text_area("Nutrition"); psycho=st.text_area("Psychosocial")
-            notes=st.text_area("Notes")
-            submitted=st.form_submit_button("Save Patient")
-            if submitted and pid:
-                cur=get_conn().cursor()
-                cur.execute("""INSERT OR REPLACE INTO patients 
-                (id,name,dob,gender,phone,address,emergency_contact,diagnosis,pmh,allergies,medications,physician,
-                 care_type,care_frequency,care_needs,mobility,cognition,nutrition,psychosocial,notes,created_by,created_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (pid,name,dob.isoformat(),gender,phone,addr,emerg,diag,pmh,allergies,meds,physician,
-                 care_type,freq,needs,mobility,cog,nutri,psycho,notes,st.session_state.user,now_iso()))
-                get_conn().commit(); st.success("Patient saved"); st.rerun()
-    st.dataframe(patients)
+    patients_df = read_table("patients")
 
-    # Vitals
-    st.markdown("### Vital Signs Record")
-    v=read_table("vitals")
-    if not patients.empty:
-        with st.form("add_vital",clear_on_submit=True):
-            sel=st.selectbox("Patient",patients['id'].tolist())
-            d=st.date_input("Date",value=date.today()); bp=st.text_input("BP"); hr=st.text_input("HR")
-            temp=st.text_input("Temp"); resp=st.text_input("Resp"); o2=st.text_input("O2 Sat")
-            wt=st.text_input("Weight"); notes=st.text_area("Notes")
-            if st.form_submit_button("Save Vital"):
-                cur=get_conn().cursor()
-                cur.execute("INSERT INTO vitals (patient_id,date,bp,hr,temp,resp,o2sat,weight,notes) VALUES (?,?,?,?,?,?,?,?,?)",
-                            (sel,d.isoformat(),bp,hr,temp,resp,o2,wt,notes)); get_conn().commit(); st.success("Saved"); st.rerun()
-    st.dataframe(v)
+    # fetch dynamic custom fields (admin-managed)
+    custom_fields = get_extra_fields(entity="patients")  # list of dicts with id, field_name, field_order
 
-    # Visit log
-    st.markdown("### Visit Log")
-    vl=read_table("visit_log")
-    if not patients.empty:
-        with st.form("add_log",clear_on_submit=True):
-            sel=st.selectbox("Patient ",patients['id'].tolist())
-            d=st.date_input("Date",value=date.today()); care=st.text_input("Caregiver")
-            vt=st.text_input("Visit Type"); serv=st.text_area("Services Provided")
-            resp=st.text_area("Patient Response"); sig=st.text_input("Signature")
-            if st.form_submit_button("Save Log"):
-                cur=get_conn().cursor()
-                cur.execute("INSERT INTO visit_log (patient_id,date,caregiver,visit_type,services,response,signature) VALUES (?,?,?,?,?,?,?)",
-                            (sel,d.isoformat(),care,vt,serv,resp,sig)); get_conn().commit(); st.success("Saved"); st.rerun()
-    st.dataframe(vl)
+    # Build the add-patient form including custom fields (custom fields appear after built-in fields)
+    with st.expander("Add New Patient (full file)", expanded=True):
+        with st.form("add_patient_form", clear_on_submit=True):
+            # Patient Information
+            p_id = st.text_input("Patient ID (unique)")
+            p_name = st.text_input("Name")
+            p_dob = st.date_input("Date of Birth", min_value=date(1900, 1, 1))
+            p_gender = st.selectbox("Gender", ["Female", "Male", "Other", "Prefer not to say"])
+            p_address = st.text_area("Address")
+            p_phone = st.text_input("Contact Number")
+            p_emergency = st.text_input("Emergency Contact")
+
+            # Medical Information
+            p_diagnosis = st.text_area("Primary Diagnosis")
+            p_pmh = st.text_area("Past Medical History")
+            p_allergies = st.text_area("Allergies")
+            p_medications = st.text_area("Medications")
+            p_physician = st.text_input("Physician")
+
+            # Care Plan
+            p_care_type = st.text_input("Type of Care")
+            p_care_frequency = st.text_input("Frequency")
+            p_care_needs = st.text_area("Specific Needs")
+
+            # Functional & Social Assessment
+            p_mobility = st.selectbox("Mobility", ["Independent", "Assisted", "Wheelchair", "Bedbound"])
+            p_cognition = st.text_area("Cognition")
+            p_nutrition = st.text_area("Nutrition")
+            p_psychosocial = st.text_area("Psychosocial")
+
+            # custom fields (display in order)
+            custom_values = {}
+            if custom_fields:
+                st.markdown("### Custom Sections (Admin)")
+                for cf in custom_fields:
+                    key = f"custom_{cf['id']}"
+                    custom_values[key] = st.text_input(cf['field_name'], key=key)
+
+            # Notes
+            p_notes = st.text_area("Notes / Social History")
+
+            submitted = st.form_submit_button("Save Patient")
+            if submitted:
+                if not p_id or not p_name:
+                    st.error("Patient ID and Name are required.")
+                else:
+                    cur = conn.cursor()
+                    cur.execute("""
+                        INSERT OR REPLACE INTO patients
+                        (id,name,dob,gender,phone,address,emergency_contact,diagnosis,pmh,allergies,medications,physician,care_type,care_frequency,care_needs,mobility,cognition,nutrition,psychosocial,notes,created_by,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (
+                        p_id, p_name, p_dob.isoformat(), p_gender, p_phone, p_address, p_emergency,
+                        p_diagnosis, p_pmh, p_allergies, p_medications, p_physician,
+                        p_care_type, p_care_frequency, p_care_needs, p_mobility, p_cognition,
+                        p_nutrition, p_psychosocial, p_notes, st.session_state.user, now_iso()
+                    ))
+                    db_commit()
+
+                    # save custom field values
+                    for cf in custom_fields:
+                        key = f"custom_{cf['id']}"
+                        val = custom_values.get(key)
+                        if val:
+                            upsert_extra_value("patients", p_id, cf['id'], val)
+
+                    st.success("Patient saved")
+                    st.experimental_rerun()
+
+    st.markdown("---")
+    st.write("Existing patients (table):")
+    st.dataframe(patients_df)
+
+    # --------- Vital signs (per-patient) ----------
+    st.markdown("### Vital Signs Record (add / view)")
+    vitals_df = read_table("vitals")
+    if not patients_df.empty:
+        with st.form("add_vital_form", clear_on_submit=True):
+            sel_pid = st.selectbox("Patient", patients_df['id'].tolist(), key="vital_patient_select")
+            vs_date = st.date_input("Date", value=date.today())
+            vs_bp = st.text_input("BP")
+            vs_hr = st.text_input("HR")
+            vs_temp = st.text_input("Temp")
+            vs_resp = st.text_input("Resp")
+            vs_o2 = st.text_input("O2 Sat")
+            vs_weight = st.text_input("Weight")
+            vs_notes = st.text_area("Notes")
+            if st.form_submit_button("Save vital"):
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO vitals (patient_id,date,bp,hr,temp,resp,o2sat,weight,notes)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                """, (sel_pid, vs_date.isoformat(), vs_bp, vs_hr, vs_temp, vs_resp, vs_o2, vs_weight, vs_notes))
+                db_commit()
+                st.success("Vital saved")
+                st.experimental_rerun()
+        st.dataframe(vitals_df)
+    else:
+        st.info("Add patients first to create vitals records.")
+
+    # --------- Visit Log ----------
+    st.markdown("### Visit Log (add / view)")
+    visit_log_df = read_table("visit_log")
+    if not patients_df.empty:
+        with st.form("add_visitlog_form", clear_on_submit=True):
+            sel_pid2 = st.selectbox("Patient", patients_df['id'].tolist(), key="log_patient_select")
+            vl_date = st.date_input("Date", value=date.today())
+            vl_caregiver = st.text_input("Caregiver")
+            vl_type = st.text_input("Visit Type")
+            vl_services = st.text_area("Services Provided")
+            vl_response = st.text_area("Patient Response")
+            vl_signature = st.text_input("Signature")
+            if st.form_submit_button("Save visit log"):
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT INTO visit_log (patient_id,date,caregiver,visit_type,services,response,signature)
+                    VALUES (?,?,?,?,?,?,?)
+                """, (sel_pid2, vl_date.isoformat(), vl_caregiver, vl_type, vl_services, vl_response, vl_signature))
+                db_commit()
+                st.success("Visit log saved")
+                st.experimental_rerun()
+        st.dataframe(visit_log_df)
+    else:
+        st.info("Add patients first to log visits.")
 
     render_footer()
 
-# ---------- Staff ----------
-elif choice=="Staff":
-    st.subheader("Staff"); staff=read_table("staff")
-    with st.form("add_staff",clear_on_submit=True):
-        sid=st.text_input("Staff ID"); nm=st.text_input("Name"); role=st.selectbox("Role",STAFF_ROLES)
-        phone=st.text_input("Phone"); email=st.text_input("Email"); avail=st.text_area("Availability")
-        notes=st.text_area("Notes")
-        if st.form_submit_button("Save Staff") and sid:
-            cur=get_conn().cursor()
-            cur.execute("INSERT OR REPLACE INTO staff (id,name,role,phone,email,availability,notes,created_by,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (sid,nm,role,phone,email,avail,notes,st.session_state.user,now_iso()))
-            get_conn().commit(); st.success("Saved"); st.rerun()
-    st.dataframe(staff); render_footer()
+# ---------------------------
+# STAFF
+# ---------------------------
+elif choice == "Staff":
+    st.subheader("Manage Staff")
+    staff_df = read_table("staff")
 
-# ---------- Schedule ----------
-elif choice=="Schedule":
-    st.subheader("Schedule"); patients=read_table("patients"); staff=read_table("staff"); sched=read_table("schedule")
-    with st.form("add_visit",clear_on_submit=True):
-        pat=st.selectbox("Patient",patients['id'].tolist() if not patients.empty else [])
-        stf=st.selectbox("Staff",staff['id'].tolist() if not staff.empty else [])
-        d=st.date_input("Date",value=date.today()); s=st.time_input("Start",dtime(9,0)); e=st.time_input("End",dtime(10,0))
-        vtype=st.text_input("Visit Type"); pri=st.selectbox("Priority",["Low","Normal","High","Critical"]); notes=st.text_area("Notes")
-        if st.form_submit_button("Save Visit") and pat and stf:
-            vid=make_visit_id(); dur=int((datetime.combine(date.today(),e)-datetime.combine(date.today(),s)).seconds/60)
-            cur=get_conn().cursor()
-            cur.execute("""INSERT OR REPLACE INTO schedule VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                        (vid,pat,stf,d.isoformat(),s.strftime("%H:%M"),e.strftime("%H:%M"),vtype,dur,pri,notes,st.session_state.user,now_iso()))
-            get_conn().commit(); st.success("Visit saved"); st.rerun()
-    st.dataframe(sched); render_footer()
+    with st.form("add_staff_form", clear_on_submit=True):
+        s_id = st.text_input("Staff ID (unique)")
+        s_name = st.text_input("Full name")
+        s_role = st.selectbox("Role", STAFF_ROLES)
+        s_phone = st.text_input("Phone")
+        s_email = st.text_input("Email")
+        s_availability = st.text_area("Availability (e.g. Mon-Fri 08:00-16:00)")
+        s_notes = st.text_area("Notes")
+        if st.form_submit_button("Save staff"):
+            if not s_id or not s_name:
+                st.error("Staff ID and name required")
+            else:
+                cur = conn.cursor()
+                cur.execute("""
+                    INSERT OR REPLACE INTO staff (id,name,role,phone,email,availability,notes,created_by,created_at)
+                    VALUES (?,?,?,?,?,?,?,?,?)
+                """, (s_id, s_name, s_role, s_phone, s_email, s_availability, s_notes, st.session_state.user, now_iso()))
+                db_commit()
+                st.success("Staff saved")
+                st.experimental_rerun()
 
-# ---------- Analytics ----------
-elif choice=="Analytics":
-    st.subheader("Analytics"); patients=read_table("patients"); sched=read_table("schedule")
-    if not patients.empty:
-        patients['dob_dt']=pd.to_datetime(patients['dob'],errors="coerce")
-        patients['age']=((pd.Timestamp(date.today())-patients['dob_dt']).dt.days//365).fillna(0)
-        bins=pd.cut(patients['age'],[-1,1,18,40,65,120],labels=["0-1","1-18","19-40","41-65","65+"])
-        df=bins.value_counts().reset_index(); df.columns=["Age group","Count"]
-        st.altair_chart(alt.Chart(df).mark_bar(color="#5DADE2").encode(x="Age group",y="Count"),use_container_width=True)
-    if not sched.empty:
-        w=sched['staff_id'].value_counts().reset_index(); w.columns=["Staff","Visits"]
-        st.altair_chart(alt.Chart(w).mark_bar(color="#66c2a5").encode(x="Staff",y="Visits"),use_container_width=True)
+    st.markdown("---")
+    st.write("Existing staff:")
+    st.dataframe(staff_df)
     render_footer()
 
-# ---------- Emergency ----------
-elif choice=="Emergency":
-    st.subheader("Emergency"); patients=read_table("patients")
-    if not patients.empty:
-        sel=st.selectbox("Patient",patients['id'].tolist()); row=patients[patients['id']==sel].iloc[0]; st.write(row.to_dict())
+# ---------------------------
+# SCHEDULE
+# ---------------------------
+elif choice == "Schedule":
+    st.subheader("Scheduling & Visits")
+    patients_df = read_table("patients")
+    staff_df = read_table("staff")
+    schedule_df = read_table("schedule")
+
+    col1, col2 = st.columns([2, 1])
+    with col1:
+        st.markdown("### Create visit")
+        if patients_df.empty:
+            st.warning("Add patients first")
+        if staff_df.empty:
+            st.warning("Add staff first")
+
+        with st.form("create_visit_form", clear_on_submit=True):
+            patient_sel = st.selectbox("Patient", patients_df['id'].tolist() if len(patients_df) > 0 else [], key="sch_patient")
+            staff_sel = st.selectbox("Assign staff", staff_df['id'].tolist() if len(staff_df) > 0 else [], key="sch_staff")
+            visit_date = st.date_input("Date", value=date.today())
+            start = st.time_input("Start", value=dtime(hour=9, minute=0))
+            end = st.time_input("End", value=dtime(hour=10, minute=0))
+            visit_type = st.selectbox("Visit type", ["Home visit", "Telehealth", "Wound care", "Medication administration", "Physiotherapy", "Respiratory therapy", "Assessment", "Other"])
+            priority = st.selectbox("Priority", ["Low", "Normal", "High", "Critical"])
+            notes = st.text_area("Notes / visit plan")
+            if st.form_submit_button("Create visit"):
+                if not patient_sel or not staff_sel:
+                    st.error("Select patient and staff")
+                else:
+                    visit_id = make_visit_id()
+                    duration = int((datetime.combine(date.today(), end) - datetime.combine(date.today(), start)).seconds / 60)
+                    cur = conn.cursor()
+                    cur.execute("""
+                        INSERT OR REPLACE INTO schedule (visit_id,patient_id,staff_id,date,start_time,end_time,visit_type,duration_minutes,priority,notes,created_by,created_at)
+                        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                    """, (visit_id, patient_sel, staff_sel, visit_date.isoformat(), start.strftime("%H:%M"), end.strftime("%H:%M"), visit_type, duration, priority, notes, st.session_state.user, now_iso()))
+                    db_commit()
+                    st.success(f"Visit {visit_id} created")
+                    st.experimental_rerun()
+
+    with col2:
+        st.markdown("### View / Manage visits")
+        if schedule_df.empty:
+            st.info("No visits scheduled yet.")
+        else:
+            sel_visit = st.selectbox("Select visit", schedule_df['visit_id'].tolist())
+            row = schedule_df[schedule_df['visit_id'] == sel_visit].iloc[0]
+            st.write(row.to_dict())
+            can_edit = (st.session_state.role == "admin") or (row.get("created_by") == st.session_state.user)
+            if can_edit:
+                if st.button("Delete visit"):
+                    cur = conn.cursor()
+                    cur.execute("DELETE FROM schedule WHERE visit_id = ?", (sel_visit,))
+                    db_commit()
+                    st.success("Visit deleted")
+                    st.experimental_rerun()
+            else:
+                st.info("Only admin or creator can delete this visit.")
     render_footer()
 
-# ---------- Settings ----------
-elif choice=="Settings":
-    st.subheader("Settings"); st.write(f"Logged in as {st.session_state.user} ({st.session_state.role})")
-    users=read_table("users"); st.dataframe(users); render_footer()
+# ---------------------------
+# ANALYTICS
+# ---------------------------
+elif choice == "Analytics":
+    st.subheader("Analytics")
+    patients_df = read_table("patients")
+    schedule_df = read_table("schedule")
 
-# ---------- Export ----------
-elif choice=="Export & Backup":
-    st.subheader("Export & Backup"); patients=read_table("patients"); staff=read_table("staff"); sched=read_table("schedule")
-    charts={}; 
-    if not patients.empty:
-        patients['dob_dt']=pd.to_datetime(patients['dob'],errors="coerce")
-        patients['age']=((pd.Timestamp(date.today())-patients['dob_dt']).dt.days//365).fillna(0)
-        bins=pd.cut(patients['age'],[-1,1,18,40,65,120],labels=["0-1","1-18","19-40","41-65","65+"])
-        df=bins.value_counts().reset_index(); df.columns=["Age group","Count"]
-        fig,ax=plt.subplots(); df.plot(kind="bar",x="Age group",y="Count",ax=ax,legend=False); buf=BytesIO(); plt.savefig(buf,format="png"); charts["Patients by Age"]=buf.getvalue(); buf.close()
-    if not sched.empty:
-        w=sched['staff_id'].value_counts().reset_index(); w.columns=["Staff","Visits"]
-        fig,ax=plt.subplots(); w.plot(kind="bar",x="Staff",y="Visits",ax=ax,legend=False); buf=BytesIO(); plt.savefig(buf,format="png"); charts["Workload"]=buf.getvalue(); buf.close()
-    word=create_word_report(patients,staff,sched,charts)
-    st.download_button("Download Word Report",word,"homecare_report.docx")
-    with open(DB_PATH,"rb") as f: st.download_button("Download DB",f.read(),DB_PATH)
+    st.markdown("### Patients by age group")
+    if not patients_df.empty:
+        patients_df['dob_dt'] = pd.to_datetime(patients_df['dob'], errors='coerce')
+        patients_df['age'] = ((pd.Timestamp(date.today()) - patients_df['dob_dt']).dt.days // 365).fillna(0).astype(int)
+        age_bins = pd.cut(patients_df['age'], bins=[-1, 0, 1, 18, 40, 65, 200], labels=["<1", "1-17", "18-39", "40-64", "65-200"])
+        age_count = age_bins.value_counts().sort_index().reset_index()
+        age_count.columns = ['age_group', 'count']
+        st.altair_chart(alt.Chart(age_count).mark_bar(color=ACCENT).encode(x='age_group', y='count'), use_container_width=True)
+    else:
+        st.info("No patient data")
+
+    st.markdown("### Staff workload (visits per staff)")
+    if not schedule_df.empty:
+        w = schedule_df['staff_id'].value_counts().reset_index()
+        w.columns = ['staff_id', 'visits']
+        st.altair_chart(alt.Chart(w).mark_bar(color="#66c2a5").encode(x='staff_id', y='visits'), use_container_width=True)
+    else:
+        st.info("No schedule data")
+
     render_footer()
 
-# ---------- Logout ----------
-elif choice=="Logout": logout(); st.success("Logged out"); st.rerun()
+# ---------------------------
+# EMERGENCY
+# ---------------------------
+elif choice == "Emergency":
+    st.subheader("Emergency")
+    st.warning("This panel is for quick lookups. Integrate calling/SMS in production.")
+    patients_df = read_table("patients")
+    if not patients_df.empty:
+        sel = st.selectbox("Patient", patients_df['id'].tolist())
+        row = patients_df[patients_df['id'] == sel].iloc[0]
+        st.write(row.to_dict())
+        if st.button("Show emergency contact"):
+            st.info("Emergency contact: " + str(row['emergency_contact']))
+    else:
+        st.info("No patients yet.")
+    render_footer()
 
+# ---------------------------
+# SETTINGS (users + admin extra-fields)
+# ---------------------------
+elif choice == "Settings":
+    st.subheader("Settings & User Management")
+    st.write(f"Logged in as **{st.session_state.user}** ({st.session_state.role})")
+
+    # Change own password
+    with st.expander("Change your password", expanded=True):
+        old = st.text_input("Current password", type="password", key="old_pw")
+        new = st.text_input("New password", type="password", key="new_pw")
+        new2 = st.text_input("Confirm new password", type="password", key="new_pw2")
+        if st.button("Change password"):
+            if not old or not new or new != new2:
+                st.error("Ensure fields are filled and new passwords match.")
+            else:
+                cur = conn.cursor()
+                cur.execute("SELECT password_hash FROM users WHERE username = ?", (st.session_state.user,))
+                row = cur.fetchone()
+                if row and hash_pw(old) == row[0]:
+                    cur.execute("UPDATE users SET password_hash = ? WHERE username = ?", (hash_pw(new), st.session_state.user))
+                    db_commit()
+                    st.success("Password changed.")
+                else:
+                    st.error("Current password incorrect.")
+
+    # Admin controls
+    if st.session_state.role == "admin":
+        st.markdown("### Admin: Manage users")
+        users_df = read_table("users")
+        st.dataframe(users_df[['username', 'role', 'created_at']] if not users_df.empty else pd.DataFrame())
+        with st.expander("Create new user"):
+            u_name = st.text_input("Username", key="new_user_name")
+            u_role = st.selectbox("Role", ["admin", "doctor", "nurse", "staff", "other"], key="new_user_role")
+            u_pw = st.text_input("Password", type="password", key="new_user_pw")
+            if st.button("Create user"):
+                if not u_name or not u_pw:
+                    st.error("Username and password required")
+                else:
+                    cur = conn.cursor()
+                    cur.execute("INSERT OR REPLACE INTO users (username,password_hash,role,created_at) VALUES (?,?,?,?)",
+                                (u_name, hash_pw(u_pw), u_role, now_iso()))
+                    db_commit()
+                    st.success("User created")
+                    st.experimental_rerun()
+
+        with st.expander("Reset user password"):
+            users_df2 = read_table("users")
+            if not users_df2.empty:
+                sel_user = st.selectbox("Select user", users_df2['username'].tolist())
+                new_pw = st.text_input("New password", type="password", key="reset_pw")
+                if st.button("Reset password for user"):
+                    if new_pw:
+                        cur = conn.cursor()
+                        cur.execute("UPDATE users SET password_hash = ? WHERE username = ?", (hash_pw(new_pw), sel_user))
+                        db_commit()
+                        st.success("Password reset")
+                    else:
+                        st.error("Enter a password")
+
+        # Admin: manage custom fields for patients
+        st.markdown("### Admin: Manage custom patient sections")
+        cur_fields = get_extra_fields("patients")
+        if cur_fields:
+            st.write("Existing custom sections (order shows how they appear):")
+            for cf in cur_fields:
+                st.write(f"{cf['id']}: {cf['field_name']} (order {cf['field_order']})")
+        else:
+            st.info("No custom sections yet.")
+
+        with st.expander("Add custom patient section"):
+            new_field_name = st.text_input("Field label (e.g. Drug history)")
+            new_order = st.number_input("Order (0 = top)", min_value=0, step=1, value=len(cur_fields))
+            if st.button("Add section"):
+                if new_field_name.strip() == "":
+                    st.error("Provide a field label")
+                else:
+                    add_extra_field("patients", new_field_name.strip(), int(new_order))
+                    st.success("Added")
+                    st.experimental_rerun()
+
+        with st.expander("Remove custom patient section"):
+            if cur_fields:
+                remove_sel = st.selectbox("Select section to remove", [f"{cf['id']}|{cf['field_name']}" for cf in cur_fields])
+                if st.button("Remove selected section"):
+                    fid = int(remove_sel.split("|")[0])
+                    remove_extra_field(fid)
+                    st.success("Removed")
+                    st.experimental_rerun()
+            else:
+                st.info("No custom sections to remove")
+
+        with st.expander("Reorder custom patient sections"):
+            if cur_fields:
+                ordered_input = st.text_area("Enter field ids in desired order, comma-separated (e.g. 3,1,2)", value=",".join(str(cf['id']) for cf in cur_fields))
+                if st.button("Apply new order"):
+                    try:
+                        ids = [int(x.strip()) for x in ordered_input.split(",") if x.strip()]
+                        reorder_extra_fields("patients", ids)
+                        st.success("Order updated")
+                        st.experimental_rerun()
+                    except Exception as e:
+                        st.error("Invalid input: " + str(e))
+            else:
+                st.info("No fields to reorder")
+
+    render_footer()
+
+# ---------------------------
+# EXPORT & BACKUP
+# ---------------------------
+elif choice == "Export & Backup":
+    st.subheader("Export & Backup")
+    patients_df = read_table("patients")
+    staff_df = read_table("staff")
+    schedule_df = read_table("schedule")
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        csv_pat = patients_df.to_csv(index=False).encode() if not patients_df.empty else b""
+        st.download_button("Download Patients CSV", data=csv_pat, file_name="patients.csv", mime="text/csv")
+        csv_staff = staff_df.to_csv(index=False).encode() if not staff_df.empty else b""
+        st.download_button("Download Staff CSV", data=csv_staff, file_name="staff.csv", mime="text/csv")
+    with c2:
+        excel_bytes = to_excel_bytes({"patients": patients_df, "staff": staff_df, "schedule": schedule_df})
+        st.download_button("Download Excel (all)", data=excel_bytes, file_name="homecare_data.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    with c3:
+        # Create simple charts to embed
+        charts = {}
+        if not patients_df.empty:
+            try:
+                patients_df['dob_dt'] = pd.to_datetime(patients_df['dob'], errors='coerce')
+                patients_df['age'] = ((pd.Timestamp(date.today()) - patients_df['dob_dt']).dt.days // 365).fillna(0).astype(int)
+                age_bins = pd.cut(patients_df['age'], bins=[-1, 1, 18, 40, 65, 120], labels=["<1", "1-17", "18-39", "40-64", "65+"])
+                age_count = age_bins.value_counts().sort_index().reset_index()
+                age_count.columns = ['Age group', 'Count']
+                fig, ax = plt.subplots()
+                age_count.plot(kind="bar", x="Age group", y="Count", ax=ax, legend=False, color=ACCENT)
+                buf = BytesIO(); plt.savefig(buf, format="png"); charts["Patients by age group"] = buf.getvalue(); plt.close(fig)
+            except Exception:
+                pass
+        if not schedule_df.empty:
+            try:
+                workload = schedule_df['staff_id'].value_counts().reset_index()
+                workload.columns = ['Staff', 'Visits']
+                fig, ax = plt.subplots()
+                workload.plot(kind="bar", x="Staff", y="Visits", ax=ax, legend=False, color="#66c2a5")
+                buf = BytesIO(); plt.savefig(buf, format="png"); charts["Staff workload"] = buf.getvalue(); plt.close(fig)
+            except Exception:
+                pass
+
+        word_bytes = create_word_report(patients_df, staff_df, schedule_df, charts_png=charts if charts else None)
+        st.download_button("Download Word report (with charts)", data=word_bytes, file_name="homecare_report.docx", mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+
+    # DB backup
+    try:
+        with open(DB_PATH, "rb") as f:
+            db_bytes = f.read()
+            st.download_button("Download DB file", data=db_bytes, file_name=DB_PATH, mime="application/x-sqlite3")
+    except Exception as e:
+        st.error("Could not read DB file: " + str(e))
+
+    render_footer()
+
+# ---------------------------
+# LOGOUT
+# ---------------------------
+elif choice == "Logout":
+    logout_user()
+    st.success("Logged out")
+    st.experimental_rerun()
+
+# fallback footer
+if choice not in ["Logout"]:
+    render_footer()
